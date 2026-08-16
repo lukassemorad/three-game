@@ -1,0 +1,17 @@
+<div class="crosshair"></div>
+
+@if (lookTarget(); as target) {
+  <div class="interact-prompt">
+    <span class="label">{{ target.label }}</span>
+    @if (target.interactPrompt) {
+      <span class="hint">{{ target.interactPrompt }}</span>
+    }
+  </div>
+}
+
+<div class="stat-bar">
+  <div class="stat">
+    <span class="icon">🪙</span>
+    <span class="value">{{ money() }}</span>
+  </div>
+</div>

@@ -1,6 +1,44 @@
 # ThreeGame
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 22.1.4.
+Angular 22 + Three.js projekt pro experimentování s 3D hrou z pohledu první osoby — hráč se sekyrou kácející stromy v lese. **Aktuální stav: raný PoC** — ověřuje se pohyb, ovládání a základní vykreslování, žádná herní logika (kácení, inventář, ekonomika) zatím neexistuje.
+
+## Struktura projektu (`src/app`)
+
+```
+core/
+  engine/
+    three-scene.service.ts   Three.js scéna, kamera, renderer, ovládání a render loop (jediné místo, kde žije Three.js logika)
+features/
+  game-canvas/               Hostitelská komponenta - <canvas>, "klikni pro start" overlay, napojuje ThreeSceneService
+  hud/                       Crosshair + průsvitné "stat chips" nahoře (zlato, čas) - zatím placeholder hodnoty
+  main-menu/                 Prázdný placeholder (bez obsahu/logiky)
+  inventory/                 Prázdný placeholder (bez obsahu/logiky)
+shared/                      Zatím prázdné - připraveno pro budoucí sdílené komponenty/utility
+```
+
+Routing (`app.routes.ts`): `''` → main-menu, `/game` → 3D scéna, `/inventory` → inventář.
+
+## Ovládání (v `/game`)
+
+- Klik do scény → aktivuje pointer lock (myš zamčená pro rozhlížení)
+- **W/A/S/D** — pohyb po rovině
+- **Myš** — rozhlížení
+- **Mezerník** — skok (jednoduchá gravitace, žádné kolize s objekty)
+- **Esc** — uvolní kurzor (zobrazí se zpět start overlay i HUD zmizí)
+
+Ladicí konstanty jsou nahoře v `three-scene.service.ts`: `MOVE_SPEED`, `LOOK_SENSITIVITY`, `EYE_HEIGHT`, `GRAVITY`, `JUMP_SPEED`.
+
+## Co v tomto PoC záměrně chybí
+
+- Kolize se scénou (aktuálně se dá procházet skrz kvádry-orientační body i cokoliv jiného)
+- Jakákoliv grafika/modely — jen základní Three.js primitiva (box, plane), žádné textury/GLTF modely
+- Herní logika — kácení stromů, inventář, měna/čas v HUDu jsou jen natvrdo zapsané placeholder hodnoty
+
+## Další fáze (plán)
+
+Další v pořadí je **raycasting z kamery** — zjištění, na jaký objekt se hráč dívá a v jaké je vzdálenosti. To je základ pro:
+- interakci se stromy (budoucí kácení sekerou)
+- reaktivní crosshair (např. změna barvy, když se hráč dívá na interaktivní objekt)
 
 ## Development server
 
