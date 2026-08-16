@@ -1,1 +1,1 @@
-export type TreeVariant = 'oak' | 'pine';
+export type TreeVariant = 'oak' | 'pine' | 'frostFir';

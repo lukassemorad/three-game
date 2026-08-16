@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core';
+import { SpatialGrid } from '../world/spatial-grid';
 
 export interface CircleCollider {
   readonly x: number;
@@ -6,27 +7,39 @@ export interface CircleCollider {
   readonly radius: number;
 }
 
+// Buňka o pár metrů - dost hrubá na to, aby dotaz zabral jen málo buněk, dost jemná na
+// to, aby v okolí hráče nekončilo tisíce koliderů z druhého konce mapy ve stejné buňce.
+const CELL_SIZE = 4;
+// Bezpečnostní rezerva navíc k poloměru největšího registrovaného kolideru - `resolve()`
+// řeší přesahy postupně a může výsledný bod o kousek posunout mimo původní dotazovanou
+// oblast; malá rezerva pokryje i zřetězené odražení o víc koliderů najednou.
+const QUERY_MARGIN = 1;
+
 @Injectable({ providedIn: 'root' })
 export class CollisionService {
-  private readonly colliders = new Map<string, CircleCollider>();
+  private readonly grid = new SpatialGrid<CircleCollider>(CELL_SIZE);
+  private maxColliderRadius = 0;
 
   register(id: string, collider: CircleCollider): void {
-    this.colliders.set(id, collider);
+    this.grid.insert(id, collider);
+    if (collider.radius > this.maxColliderRadius) this.maxColliderRadius = collider.radius;
   }
 
   unregister(id: string): void {
-    this.colliders.delete(id);
+    this.grid.remove(id);
   }
 
   clear(): void {
-    this.colliders.clear();
+    this.grid.clear();
+    this.maxColliderRadius = 0;
   }
 
   resolve(x: number, z: number, radius: number): { x: number; z: number } {
     let resultX = x;
     let resultZ = z;
 
-    for (const collider of this.colliders.values()) {
+    const candidates = this.grid.queryRadius(x, z, radius + this.maxColliderRadius + QUERY_MARGIN);
+    for (const collider of candidates) {
       const dx = resultX - collider.x;
       const dz = resultZ - collider.z;
       const distSq = dx * dx + dz * dz;

@@ -1,9 +1,12 @@
-import { Injectable, NgZone, signal } from '@angular/core';
+import { Injectable, NgZone, effect, signal } from '@angular/core';
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
 import { BiomeId } from '../../shared/models/biome.model';
+import { QuatLike, Vec3Like } from '../../shared/models/save-game.model';
+import { SettingsService } from '../state/settings.service';
 import { RoadNetwork } from '../world/road-network';
-import { TerrainGenerator } from '../world/terrain-generator';
+import { HeightGrid, TerrainGenerator } from '../world/terrain-generator';
+import { TERRAIN_WIDTH, TERRAIN_DEPTH, TERRAIN_SEGMENTS_X, TERRAIN_SEGMENTS_Z } from '../world/world-config';
 import { CollisionService } from './collision.service';
 import { PhysicsService } from './physics.service';
 
@@ -11,7 +14,9 @@ export interface InteractableMeta {
   readonly id: string;
   readonly label?: string;
   readonly interactPrompt?: string;
-  readonly onInteract?: (hitPoint: THREE.Vector3) => void;
+  // instanceId je nastavený jen když zásah trefil THREE.InstancedMesh (dávka nedotčených
+  // stromů, viz InstancedTreeBatch) - říká, KTERÁ konkrétní instance byla zasažena.
+  readonly onInteract?: (hitPoint: THREE.Vector3, instanceId?: number) => void;
   readonly onGrabStart?: (hitPoint: THREE.Vector3, camera: THREE.Camera) => void;
   readonly onGrabTick?: (camera: THREE.Camera, delta: number) => void;
   readonly onGrabEnd?: (throwVelocity: THREE.Vector3) => void;
@@ -25,12 +30,15 @@ export interface LookTarget {
 }
 
 const MOVE_SPEED = 6;
-const LOOK_SENSITIVITY = 0.8;
 const EYE_HEIGHT = 1.6;
 const PLAYER_RADIUS = 0.35;
 export const GRAVITY = 20;
 const JUMP_SPEED = 7;
 const INTERACTION_DISTANCE = 4;
+// Rezerva navíc k INTERACTION_DISTANCE pro hrubý distance pre-filter níže - kryje i
+// objekty, jejichž samotná geometrie (ne jen group.position) zasahuje blíž ke kameře,
+// než kolik je vzdálenost od jejich počátku (typicky koruna stromu/roh budovy).
+const INTERACTABLE_PREFILTER_MARGIN = 6;
 const GRABBED_PROMPT = 'Pusť pro zahození';
 const THROW_SPEED = 8;
 
@@ -39,11 +47,6 @@ const UPHILL_SLOPE_PENALTY = 1.4;
 const MIN_UPHILL_SPEED_MULTIPLIER = 0.3;
 const JUMP_SLOPE_PENALTY = 0.6;
 const MIN_JUMP_SLOPE_MULTIPLIER = 0.5;
-
-const TERRAIN_WIDTH = 100;
-const TERRAIN_DEPTH = 200;
-const TERRAIN_SEGMENTS_X = 100;
-const TERRAIN_SEGMENTS_Z = 200;
 
 @Injectable({ providedIn: 'root' })
 export class ThreeSceneService {
@@ -73,6 +76,7 @@ export class ThreeSceneService {
   private lastResolvedMeta: InteractableMeta | null = null;
   private lastSignaledMeta: InteractableMeta | null = null;
   private lastHitPoint: THREE.Vector3 | null = null;
+  private lastHitInstanceId: number | null = null;
   private heldMeta: InteractableMeta | null = null;
 
   private readonly tickables = new Set<(delta: number) => void>();
@@ -110,7 +114,7 @@ export class ThreeSceneService {
       return;
     }
     if (this.lastResolvedMeta && this.lastHitPoint) {
-      this.lastResolvedMeta.onInteract?.(this.lastHitPoint);
+      this.lastResolvedMeta.onInteract?.(this.lastHitPoint, this.lastHitInstanceId ?? undefined);
     }
   };
 
@@ -126,8 +130,14 @@ export class ThreeSceneService {
   constructor(
     private readonly zone: NgZone,
     private readonly collision: CollisionService,
-    private readonly physics: PhysicsService
-  ) {}
+    private readonly physics: PhysicsService,
+    private readonly settings: SettingsService
+  ) {
+    effect(() => {
+      const sensitivity = this.settings.lookSensitivity();
+      if (this.controls) this.controls.pointerSpeed = sensitivity;
+    });
+  }
 
   async init(canvas: HTMLCanvasElement, roads?: RoadNetwork): Promise<void> {
     this.terrain = new TerrainGenerator(roads);
@@ -138,11 +148,18 @@ export class ThreeSceneService {
     this.lastResolvedMeta = null;
     this.lastSignaledMeta = null;
     this.lastHitPoint = null;
+    this.lastHitInstanceId = null;
     this.heldMeta = null;
     this.tickables.clear();
     this.lookTargetSignal.set(null);
     this.collision.clear();
-    await this.physics.init(this.terrain, GRAVITY);
+    const heightGrid = this.terrain.computeHeightGrid(
+      TERRAIN_WIDTH,
+      TERRAIN_DEPTH,
+      TERRAIN_SEGMENTS_X,
+      TERRAIN_SEGMENTS_Z
+    );
+    await this.physics.init(heightGrid, GRAVITY);
 
     this.raycaster.far = INTERACTION_DISTANCE;
 
@@ -153,17 +170,17 @@ export class ThreeSceneService {
       75,
       canvas.clientWidth / canvas.clientHeight,
       0.1,
-      500
+      600
     );
-    this.camera.position.set(0, this.getGroundHeight(0, -5) + EYE_HEIGHT, -5);
+    this.camera.position.set(0, this.getGroundHeight(0, -40) + EYE_HEIGHT, -40);
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
 
-    this.buildScene();
+    this.buildScene(heightGrid);
 
     this.controls = new PointerLockControls(this.camera, canvas);
-    this.controls.pointerSpeed = LOOK_SENSITIVITY;
+    this.controls.pointerSpeed = this.settings.lookSensitivity();
     this.controls.addEventListener('lock', () => {
       this.zone.run(() => this.lockedSignal.set(true));
       // Prohlížeč po (re)zamčení kurzoru občas dodá první mousemove s nafouknutým
@@ -171,7 +188,7 @@ export class ThreeSceneService {
       // to způsobilo prudké, dezorientující otočení kamery. Jeden frame s nulovou
       // citlivostí ho spolehlivě pohltí.
       this.controls.pointerSpeed = 0;
-      requestAnimationFrame(() => (this.controls.pointerSpeed = LOOK_SENSITIVITY));
+      requestAnimationFrame(() => (this.controls.pointerSpeed = this.settings.lookSensitivity()));
     });
     this.controls.addEventListener('unlock', () => this.zone.run(() => this.lockedSignal.set(false)));
 
@@ -188,6 +205,23 @@ export class ThreeSceneService {
 
   lock(): void {
     this.controls.lock();
+  }
+
+  getPlayerTransform(): { position: Vec3Like; quaternion: QuatLike } {
+    return {
+      position: { x: this.camera.position.x, y: this.camera.position.y, z: this.camera.position.z },
+      quaternion: {
+        x: this.camera.quaternion.x,
+        y: this.camera.quaternion.y,
+        z: this.camera.quaternion.z,
+        w: this.camera.quaternion.w
+      }
+    };
+  }
+
+  setPlayerTransform(position: Vec3Like, quaternion: QuatLike): void {
+    this.camera.position.set(position.x, position.y, position.z);
+    this.camera.quaternion.set(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
   }
 
   addToScene(object: THREE.Object3D): void {
@@ -224,8 +258,8 @@ export class ThreeSceneService {
     return this.terrain.getHeight(x, z);
   }
 
-  getBiomeAt(z: number): BiomeId {
-    return this.terrain.getBiomeAt(z);
+  getBiomeAt(x: number, z: number): BiomeId {
+    return this.terrain.getBiomeAt(x, z);
   }
 
   resize(width: number, height: number): void {
@@ -257,13 +291,14 @@ export class ThreeSceneService {
     this.lastResolvedMeta = null;
     this.lastSignaledMeta = null;
     this.lastHitPoint = null;
+    this.lastHitInstanceId = null;
     this.heldMeta = null;
     this.tickables.clear();
     this.lookTargetSignal.set(null);
     this.collision.clear();
   }
 
-  private buildScene(): void {
+  private buildScene(heightGrid: HeightGrid): void {
     const groundGeometry = new THREE.PlaneGeometry(
       TERRAIN_WIDTH,
       TERRAIN_DEPTH,
@@ -272,15 +307,18 @@ export class ThreeSceneService {
     );
     const position = groundGeometry.attributes['position'] as THREE.BufferAttribute;
     const colors = new Float32Array(position.count * 3);
+    const cols = TERRAIN_SEGMENTS_X + 1;
+    // PlaneGeometry staví vrcholy po řádcích: index i = row * cols + col, row ~ krok po lokální
+    // Y (= -world Z, viz rotation.x = -PI/2 níže), col ~ krok po lokální X (= world X) -
+    // stejné pořadí, se kterým počítá TerrainGenerator.computeHeightGrid, takže se dá číst
+    // přímo bez přepočtu world souřadnic a bez druhého volání getHeight/getColor za běhu.
     for (let i = 0; i < position.count; i++) {
-      const worldX = position.getX(i);
-      // rotation.x = -PI/2 mapuje local (x,y,0) -> world (x,0,-y), world Z je tedy -local.y
-      // (ověřeno numericky) - bez tohoto znaménka by se vizuál terénu rozešel s getGroundHeight().
-      const worldZ = -position.getY(i);
-      const height = this.terrain.getHeight(worldX, worldZ);
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const height = heightGrid.getHeightAt(col, row);
       position.setZ(i, height);
 
-      const color = this.terrain.getColor(height, worldX, worldZ);
+      const color = heightGrid.getColorAt(col, row);
       colors[i * 3] = color.r;
       colors[i * 3 + 1] = color.g;
       colors[i * 3 + 2] = color.b;
@@ -384,7 +422,8 @@ export class ThreeSceneService {
     this.camera.updateMatrixWorld();
     this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera);
 
-    const hits = this.raycaster.intersectObjects(this.interactableList, true);
+    const nearby = this.filterNearbyInteractables();
+    const hits = this.raycaster.intersectObjects(nearby, true);
     const resolved = hits.length > 0 ? this.resolveInteractable(hits[0].object) : null;
 
     if (!resolved) {
@@ -395,6 +434,7 @@ export class ThreeSceneService {
     this.currentDistance = hits[0].distance;
     this.lastResolvedMeta = resolved.meta;
     this.lastHitPoint = hits[0].point.clone();
+    this.lastHitInstanceId = hits[0].instanceId ?? null;
     this.lastTargetId = resolved.meta.id;
 
     // Porovnání referencí, ne jen id - meta se re-registruje s novým objektem
@@ -411,11 +451,29 @@ export class ThreeSceneService {
     }
   }
 
+  // Předfiltruje interactableList na kandidáty, které raycast má vůbec šanci trefit -
+  // dřív se `raycaster.intersectObjects` volal proti celému seznamu bez ohledu na
+  // vzdálenost, i když INTERACTION_DISTANCE je jen 4 jednotky. InstancedMesh (dávka
+  // nedotčených stromů) se nefiltruje vůbec - je jich konstantně málo (pár na variantu)
+  // bez ohledu na to, kolik stromů celkem existuje, takže se to nevyplatí.
+  private filterNearbyInteractables(): THREE.Object3D[] {
+    const maxDistSq = (INTERACTION_DISTANCE + INTERACTABLE_PREFILTER_MARGIN) ** 2;
+    const cameraPos = this.camera.position;
+    return this.interactableList.filter((object) => {
+      if (object instanceof THREE.InstancedMesh) return true;
+      const dx = object.position.x - cameraPos.x;
+      const dy = object.position.y - cameraPos.y;
+      const dz = object.position.z - cameraPos.z;
+      return dx * dx + dy * dy + dz * dz <= maxDistSq;
+    });
+  }
+
   private clearLookTarget(): void {
     this.currentDistance = null;
     this.lastResolvedMeta = null;
     this.lastSignaledMeta = null;
     this.lastHitPoint = null;
+    this.lastHitInstanceId = null;
     if (this.lastTargetId !== null) {
       this.lastTargetId = null;
       this.zone.run(() => this.lookTargetSignal.set(null));

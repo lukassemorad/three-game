@@ -1,15 +1,25 @@
 import * as THREE from 'three';
-import { Choppable } from '../../shared/models/interactable.model';
+import { Choppable, TreeLifecycle } from '../../shared/models/interactable.model';
+import { QuatLike, TreeSectorHit, Vec3Like } from '../../shared/models/save-game.model';
 import { TreeVariant } from '../../shared/models/tree.model';
 import { FallenLogHandle } from '../engine/physics.service';
 
 export type { TreeVariant };
+
+export interface TreeRestoreState {
+  readonly choppedSectorHits: readonly TreeSectorHit[];
+  readonly lifecycle: TreeLifecycle;
+  readonly fallProgress: number;
+  readonly fallAxis: Vec3Like | null;
+  readonly rotation: QuatLike;
+}
 
 export interface TreeConfig {
   readonly position: THREE.Vector3;
   readonly variant?: TreeVariant;
   readonly sectorCount?: number;
   readonly woodYield?: number;
+  readonly restore?: TreeRestoreState;
 }
 
 export interface ChopResult {
@@ -18,9 +28,10 @@ export interface ChopResult {
   readonly woodGained: number;
 }
 
-interface TreeFoliageLayer {
+export interface TreeFoliageLayer {
   readonly geometry: THREE.ConeGeometry;
   readonly positionY: number;
+  readonly material?: THREE.MeshStandardMaterial;
 }
 
 interface TreeVariantDefinition {
@@ -116,8 +127,61 @@ const TREE_VARIANTS: Record<TreeVariant, TreeVariantDefinition> = {
     ],
     defaultSectorCount: 6,
     defaultWoodYield: 10
+  },
+  frostFir: {
+    trunkRadiusTop: 0.4,
+    trunkRadiusBottom: 0.62,
+    trunkHeight: 7.8,
+    trunkMaterial: new THREE.MeshStandardMaterial({ color: 0x5c564c }),
+    trunkPositionY: 3.9,
+    foliageMaterial: new THREE.MeshStandardMaterial({ color: 0x445c53 }),
+    // 4 vrstvy (o jednu víc než pine) pro majestátnější siluetu; nejvyšší vrstva má
+    // vlastní (skoro bílý) materiál - "sněhová čepička" odlišující strom na první pohled.
+    foliageLayers: [
+      { geometry: new THREE.ConeGeometry(3.9, 5.2, 8), positionY: 6.8 },
+      { geometry: new THREE.ConeGeometry(2.9, 4.6, 8), positionY: 9.4 },
+      { geometry: new THREE.ConeGeometry(2.0, 4.0, 8), positionY: 11.7 },
+      {
+        geometry: new THREE.ConeGeometry(1.1, 2.2, 8),
+        positionY: 13.6,
+        material: new THREE.MeshStandardMaterial({ color: 0xe8f0ee })
+      }
+    ],
+    defaultSectorCount: 8,
+    defaultWoodYield: 24
   }
 };
+
+// Vizuální data potřebná k vykreslení dávky NEDOTČENÝCH stromů jedné varianty jako
+// THREE.InstancedMesh (viz InstancedTreeBatch) - stejná sdílená geometrie/materiály,
+// jaké používá i samotný TreeEntity konstruktor níže, takže povýšení stromu z instance
+// na plnohodnotný TreeEntity (viz TreeService.chopIntact) nezpůsobí žádný vizuální "pop".
+export interface IntactTreeVisual {
+  readonly sectorCount: number;
+  readonly wedgeGeometries: readonly THREE.BufferGeometry[];
+  readonly wedgeMaterial: THREE.MeshStandardMaterial;
+  readonly trunkPositionY: number;
+  readonly foliageLayers: readonly TreeFoliageLayer[];
+  readonly foliageMaterial: THREE.MeshStandardMaterial;
+}
+
+export function getIntactTreeVisual(variantKey: TreeVariant): IntactTreeVisual {
+  const variant = TREE_VARIANTS[variantKey];
+  const sectorCount = variant.defaultSectorCount;
+  return {
+    sectorCount,
+    wedgeGeometries: getIntactWedgeGeometries(variantKey, variant, sectorCount),
+    wedgeMaterial: variant.trunkMaterial,
+    trunkPositionY: variant.trunkPositionY,
+    foliageLayers: variant.foliageLayers,
+    foliageMaterial: variant.foliageMaterial
+  };
+}
+
+export function getTreeColliderInfo(variantKey: TreeVariant): { radius: number; height: number } {
+  const variant = TREE_VARIANTS[variantKey];
+  return { radius: variant.trunkRadiusBottom, height: variant.trunkHeight };
+}
 
 let nextTreeId = 0;
 
@@ -125,37 +189,42 @@ export class TreeEntity {
   readonly id: string;
   readonly group: THREE.Group;
   readonly state: Choppable;
+  readonly variant: TreeVariant;
 
-  private readonly variant: TreeVariantDefinition;
+  private readonly variantDef: TreeVariantDefinition;
   private readonly wedgeMeshes: THREE.Mesh[];
   private readonly foliageMeshes: THREE.Mesh[];
-  private fallAxis: THREE.Vector3 | null = null;
+  private fallAxisVector: THREE.Vector3 | null = null;
   physicsHandle: FallenLogHandle | null = null;
 
   get colliderRadius(): number {
-    return this.variant.trunkRadiusBottom;
+    return this.variantDef.trunkRadiusBottom;
   }
 
   get trunkHeight(): number {
-    return this.variant.trunkHeight;
+    return this.variantDef.trunkHeight;
+  }
+
+  get fallAxis(): THREE.Vector3 | null {
+    return this.fallAxisVector;
   }
 
   constructor(config: TreeConfig) {
     this.id = `tree-${nextTreeId++}`;
 
-    const variantKey = config.variant ?? 'oak';
-    this.variant = TREE_VARIANTS[variantKey];
+    this.variant = config.variant ?? 'oak';
+    this.variantDef = TREE_VARIANTS[this.variant];
 
-    const sectorCount = config.sectorCount ?? this.variant.defaultSectorCount;
-    const wedgeGeometries = getIntactWedgeGeometries(variantKey, this.variant, sectorCount);
+    const sectorCount = config.sectorCount ?? this.variantDef.defaultSectorCount;
+    const wedgeGeometries = getIntactWedgeGeometries(this.variant, this.variantDef, sectorCount);
     this.wedgeMeshes = wedgeGeometries.map((geometry) => {
-      const mesh = new THREE.Mesh(geometry, this.variant.trunkMaterial);
-      mesh.position.y = this.variant.trunkPositionY;
+      const mesh = new THREE.Mesh(geometry, this.variantDef.trunkMaterial);
+      mesh.position.y = this.variantDef.trunkPositionY;
       return mesh;
     });
 
-    this.foliageMeshes = this.variant.foliageLayers.map((layer) => {
-      const mesh = new THREE.Mesh(layer.geometry, this.variant.foliageMaterial);
+    this.foliageMeshes = this.variantDef.foliageLayers.map((layer) => {
+      const mesh = new THREE.Mesh(layer.geometry, layer.material ?? this.variantDef.foliageMaterial);
       mesh.position.y = layer.positionY;
       return mesh;
     });
@@ -164,14 +233,31 @@ export class TreeEntity {
     this.group.add(...this.wedgeMeshes, ...this.foliageMeshes);
     this.group.position.copy(config.position);
 
+    const sectorAngle = (Math.PI * 2) / sectorCount;
+    const choppedSectors = new Map<number, number>();
+    const restore = config.restore;
+    if (restore) {
+      for (const hit of restore.choppedSectorHits) {
+        choppedSectors.set(hit.sector, hit.hitY);
+        this.carveWedge(hit.sector, sectorAngle, hit.hitY);
+      }
+      if (restore.lifecycle !== 'standing') {
+        for (const mesh of this.foliageMeshes) this.group.remove(mesh);
+      }
+      if (restore.lifecycle === 'falling' && restore.fallAxis) {
+        this.fallAxisVector = new THREE.Vector3(restore.fallAxis.x, restore.fallAxis.y, restore.fallAxis.z);
+      }
+      this.group.quaternion.set(restore.rotation.x, restore.rotation.y, restore.rotation.z, restore.rotation.w);
+    }
+
     this.state = {
       kind: 'choppable',
       sectorCount,
-      choppedSectors: new Set<number>(),
-      lastHitSector: null,
-      lifecycle: 'standing',
-      fallProgress: 0,
-      resource: { type: 'wood', amount: config.woodYield ?? this.variant.defaultWoodYield }
+      choppedSectors,
+      lastHitSector: restore?.choppedSectorHits.at(-1)?.sector ?? null,
+      lifecycle: restore?.lifecycle ?? 'standing',
+      fallProgress: restore?.fallProgress ?? 0,
+      resource: { type: 'wood', amount: config.woodYield ?? this.variantDef.defaultWoodYield }
     };
   }
 
@@ -193,7 +279,7 @@ export class TreeEntity {
       return { outcome: 'repeatedSector', sectorsRemaining: this.remainingSectors(), woodGained: 0 };
     }
 
-    this.state.choppedSectors.add(sectorIndex);
+    this.state.choppedSectors.set(sectorIndex, local.y);
     this.state.lastHitSector = sectorIndex;
     this.carveWedge(sectorIndex, sectorAngle, local.y);
 
@@ -214,7 +300,7 @@ export class TreeEntity {
     if (this.state.lifecycle !== 'fallen') return null;
     const axis = new THREE.Vector3(0, 1, 0).applyQuaternion(this.group.quaternion);
     const start = new THREE.Vector2(this.group.position.x, this.group.position.z);
-    const end = start.clone().add(new THREE.Vector2(axis.x, axis.z).multiplyScalar(this.variant.trunkHeight));
+    const end = start.clone().add(new THREE.Vector2(axis.x, axis.z).multiplyScalar(this.variantDef.trunkHeight));
     return { start, end, radius: this.colliderRadius };
   }
 
@@ -256,10 +342,10 @@ export class TreeEntity {
     const originalNormal = (carved.attributes['normal'] as THREE.BufferAttribute).clone();
     const displaced = new Uint8Array(position.count);
 
-    const halfHeight = this.variant.trunkHeight / 2;
+    const halfHeight = this.variantDef.trunkHeight / 2;
     const margin = 0.2;
     const wedgeLocalHitY = THREE.MathUtils.clamp(
-      hitY - this.variant.trunkPositionY,
+      hitY - this.variantDef.trunkPositionY,
       -halfHeight + margin,
       halfHeight - margin
     );
@@ -317,7 +403,7 @@ export class TreeEntity {
     // "pryč od poslední rány" - strom padá na opačnou stranu, než přišel poslední zásah.
     // Směr ven z kmene při úhlu theta je (sin theta, 0, cos theta) - viz konvence CylinderGeometry výše.
     const fallDir = new THREE.Vector3(-Math.sin(hitAngle), 0, -Math.cos(hitAngle));
-    this.fallAxis = new THREE.Vector3(fallDir.z, 0, -fallDir.x).normalize();
+    this.fallAxisVector = new THREE.Vector3(fallDir.z, 0, -fallDir.x).normalize();
 
     for (const mesh of this.foliageMeshes) this.group.remove(mesh);
 

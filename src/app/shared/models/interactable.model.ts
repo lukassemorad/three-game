@@ -5,7 +5,7 @@ export type TreeLifecycle = 'standing' | 'falling' | 'fallen';
 export interface Choppable {
   readonly kind: 'choppable';
   readonly sectorCount: number;
-  readonly choppedSectors: Set<number>;
+  readonly choppedSectors: Map<number, number>;
   lastHitSector: number | null;
   lifecycle: TreeLifecycle;
   fallProgress: number;

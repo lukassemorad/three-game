@@ -4,8 +4,10 @@ import type * as RapierNS from '@dimforge/rapier3d-compat';
 import { CollisionService } from '../engine/collision.service';
 import { ThreeSceneService } from '../engine/three-scene.service';
 import { PhysicsService } from '../engine/physics.service';
+import { IntactTreeSaveState, TreeSaveState } from '../../shared/models/save-game.model';
 import { PlayerStateService } from '../state/player-state.service';
-import { TreeEntity, TreeVariant } from './tree.entity';
+import { InstancedTreeBatch } from './instanced-tree-batch';
+import { getIntactTreeVisual, getTreeColliderInfo, TreeEntity, TreeVariant } from './tree.entity';
 
 export interface TreeSpawnEntry {
   readonly position: THREE.Vector3;
@@ -86,12 +88,24 @@ function springTowardRotation(
   }
 }
 
+interface IntactTreeInfo {
+  readonly variant: TreeVariant;
+  readonly position: THREE.Vector3;
+}
+
 @Injectable({ providedIn: 'root' })
 export class TreeService {
   private readonly trees = new Map<string, TreeEntity>();
   private readonly fallingTrees = new Set<TreeEntity>();
   private readonly fallenTrees = new Set<TreeEntity>();
+  // standingBodies je klíčovaný stejným id jako collision registrace - pro nedotčené
+  // (instancované) stromy id ve tvaru "intact-N", pro povýšené/samostatné stromy tree.id.
   private readonly standingBodies = new Map<string, RapierNS.RigidBody>();
+  // Nedotčené stromy vykreslované instancovaně (viz InstancedTreeBatch) - jedna dávka na
+  // variantu. intactTrees drží pozici/variantu, dokud strom nedostane první zásah.
+  private readonly instancedBatches = new Map<TreeVariant, InstancedTreeBatch>();
+  private readonly intactTrees = new Map<string, IntactTreeInfo>();
+  private nextIntactTreeId = 0;
   private heldTree: TreeEntity | null = null;
   private tickableRegistered = false;
 
@@ -113,6 +127,9 @@ export class TreeService {
     private readonly physics: PhysicsService
   ) {}
 
+  // Nedotčené stromy se nevykreslují jako individuální TreeEntity, ale jako pár
+  // InstancedTreeBatch dávek (jedna na variantu) - viz chopIntact() pro "povýšení"
+  // stromu na plnohodnotný TreeEntity při prvním zásahu.
   spawnTrees(entries: TreeSpawnEntry[]): void {
     if (!this.tickableRegistered) {
       this.tickableRegistered = true;
@@ -122,26 +139,202 @@ export class TreeService {
         this.syncFallenTreesToCollision();
       });
     }
+
+    const byVariant = new Map<TreeVariant, TreeSpawnEntry[]>();
     for (const entry of entries) {
-      const tree = new TreeEntity({ position: entry.position, variant: entry.variant });
-      this.trees.set(tree.id, tree);
-      this.scene.addToScene(tree.group);
-      this.registerTree(tree);
-      this.collision.register(tree.id, {
-        x: entry.position.x,
-        z: entry.position.z,
-        radius: tree.colliderRadius
+      const variant = entry.variant ?? 'oak';
+      const list = byVariant.get(variant);
+      if (list) list.push(entry);
+      else byVariant.set(variant, [entry]);
+    }
+
+    for (const [variant, variantEntries] of byVariant) {
+      const visual = getIntactTreeVisual(variant);
+      const colliderInfo = getTreeColliderInfo(variant);
+      const batch = new InstancedTreeBatch(visual, variantEntries.length);
+      this.instancedBatches.set(variant, batch);
+
+      for (const mesh of batch.getMeshes()) {
+        this.scene.addToScene(mesh);
+        this.scene.registerInteractable(mesh, {
+          id: `intact-batch-${variant}`,
+          label: 'Strom',
+          interactPrompt: `Klikni pro pokácení (${visual.sectorCount}/${visual.sectorCount} stran zbývá)`,
+          onInteract: (hitPoint, instanceId) => this.chopIntact(variant, batch, hitPoint, instanceId)
+        });
+      }
+
+      for (const entry of variantEntries) {
+        const id = `intact-${this.nextIntactTreeId++}`;
+        batch.addInstance(id, entry.position);
+        this.intactTrees.set(id, { variant, position: entry.position.clone() });
+        this.collision.register(id, {
+          x: entry.position.x,
+          z: entry.position.z,
+          radius: colliderInfo.radius
+        });
+        this.standingBodies.set(
+          id,
+          this.physics.createStaticTreeCollider(
+            entry.position.x,
+            entry.position.y,
+            entry.position.z,
+            colliderInfo.radius,
+            colliderInfo.height
+          )
+        );
+      }
+    }
+  }
+
+  // Strom dostal první zásah, dokud byl ještě jen instancí v dávce - "povýší" se na
+  // plnohodnotný TreeEntity (stejná sdílená intact geometrie, žádný vizuální pop) a
+  // hned na něj aplikuje tenhle první zásah přes existující chop() logiku.
+  private chopIntact(
+    variant: TreeVariant,
+    batch: InstancedTreeBatch,
+    hitPoint: THREE.Vector3,
+    instanceId?: number
+  ): void {
+    if (instanceId === undefined) return;
+    const treeId = batch.getTreeIdAt(instanceId);
+    if (!treeId) return;
+    const info = this.intactTrees.get(treeId);
+    if (!info) return;
+
+    batch.removeInstance(treeId);
+    this.intactTrees.delete(treeId);
+    this.collision.unregister(treeId);
+    const standingBody = this.standingBodies.get(treeId);
+    if (standingBody) {
+      this.physics.removeRigidBody(standingBody);
+      this.standingBodies.delete(treeId);
+    }
+
+    const tree = new TreeEntity({ position: info.position, variant });
+    this.trees.set(tree.id, tree);
+    this.scene.addToScene(tree.group);
+    this.collision.register(tree.id, {
+      x: info.position.x,
+      z: info.position.z,
+      radius: tree.colliderRadius
+    });
+    this.standingBodies.set(
+      tree.id,
+      this.physics.createStaticTreeCollider(
+        info.position.x,
+        info.position.y,
+        info.position.z,
+        tree.colliderRadius,
+        tree.trunkHeight
+      )
+    );
+
+    this.chop(tree, hitPoint);
+  }
+
+  // Nedotčené stromy (jen pozice+varianta, viz intactTrees) se dají obnovit rovnou
+  // přes spawnTrees - detailed jsou stromy, které už dostaly aspoň jeden zásah a nesou
+  // plný stav (posekané sektory/lifecycle/pád), viz restoreTrees.
+  getSerializableState(): { intact: IntactTreeSaveState[]; detailed: TreeSaveState[] } {
+    const intact: IntactTreeSaveState[] = [];
+    for (const info of this.intactTrees.values()) {
+      intact.push({
+        position: { x: info.position.x, y: info.position.y, z: info.position.z },
+        variant: info.variant
       });
-      this.standingBodies.set(
-        tree.id,
-        this.physics.createStaticTreeCollider(
-          entry.position.x,
-          entry.position.y,
-          entry.position.z,
-          tree.colliderRadius,
-          tree.trunkHeight
-        )
-      );
+    }
+
+    const detailed: TreeSaveState[] = [];
+    const detailedTrees: TreeEntity[] = [...this.trees.values(), ...this.fallingTrees, ...this.fallenTrees];
+    for (const tree of detailedTrees) {
+      const fallAxis = tree.state.lifecycle === 'falling' && tree.fallAxis;
+      detailed.push({
+        position: { x: tree.group.position.x, y: tree.group.position.y, z: tree.group.position.z },
+        rotation: {
+          x: tree.group.quaternion.x,
+          y: tree.group.quaternion.y,
+          z: tree.group.quaternion.z,
+          w: tree.group.quaternion.w
+        },
+        variant: tree.variant,
+        sectorCount: tree.state.sectorCount,
+        woodYield: tree.state.resource.amount,
+        choppedSectorHits: Array.from(tree.state.choppedSectors.entries()).map(([sector, hitY]) => ({
+          sector,
+          hitY
+        })),
+        lifecycle: tree.state.lifecycle,
+        fallProgress: tree.state.fallProgress,
+        fallAxis: fallAxis ? { x: fallAxis.x, y: fallAxis.y, z: fallAxis.z } : null
+      });
+    }
+
+    return { intact, detailed };
+  }
+
+  // Nahrazuje spawnTrees(generateTreePositions(...)) na load-cestě. Nedotčené stromy se
+  // spawnují normální cestou (spawnTrees), stromy s uloženým "detailed" stavem se obnoví
+  // jako plnohodnotné TreeEntity ve stejném lifecycle, ve kterém byly uloženy.
+  restoreTrees(state: { intact: readonly IntactTreeSaveState[]; detailed: readonly TreeSaveState[] }): void {
+    this.spawnTrees(
+      state.intact.map((entry) => ({
+        position: new THREE.Vector3(entry.position.x, entry.position.y, entry.position.z),
+        variant: entry.variant
+      }))
+    );
+
+    for (const entry of state.detailed) {
+      const position = new THREE.Vector3(entry.position.x, entry.position.y, entry.position.z);
+      const rotation = new THREE.Quaternion(entry.rotation.x, entry.rotation.y, entry.rotation.z, entry.rotation.w);
+      const tree = new TreeEntity({
+        position,
+        variant: entry.variant,
+        sectorCount: entry.sectorCount,
+        woodYield: entry.woodYield,
+        restore: {
+          choppedSectorHits: entry.choppedSectorHits,
+          lifecycle: entry.lifecycle,
+          fallProgress: entry.fallProgress,
+          fallAxis: entry.fallAxis,
+          rotation: entry.rotation
+        }
+      });
+
+      switch (entry.lifecycle) {
+        case 'standing':
+          this.trees.set(tree.id, tree);
+          this.scene.addToScene(tree.group);
+          this.registerTree(tree);
+          this.collision.register(tree.id, { x: position.x, z: position.z, radius: tree.colliderRadius });
+          this.standingBodies.set(
+            tree.id,
+            this.physics.createStaticTreeCollider(
+              position.x,
+              position.y,
+              position.z,
+              tree.colliderRadius,
+              tree.trunkHeight
+            )
+          );
+          break;
+        case 'falling':
+          this.scene.addToScene(tree.group);
+          this.fallingTrees.add(tree);
+          break;
+        case 'fallen':
+          this.scene.addToScene(tree.group);
+          tree.physicsHandle = this.physics.createFallenLogBody(
+            position,
+            rotation,
+            tree.colliderRadius,
+            tree.trunkHeight
+          );
+          this.fallenTrees.add(tree);
+          this.registerFallenTree(tree);
+          this.registerFallenCollisionSegments(tree);
+          break;
+      }
     }
   }
 
@@ -150,6 +343,9 @@ export class TreeService {
     this.fallingTrees.clear();
     this.fallenTrees.clear();
     this.standingBodies.clear();
+    this.instancedBatches.clear();
+    this.intactTrees.clear();
+    this.nextIntactTreeId = 0;
     this.heldTree = null;
     this.tickableRegistered = false;
     this.grabOffsetLocal = null;
@@ -353,6 +549,7 @@ export class TreeService {
       }
       this.trees.delete(tree.id);
       this.fallingTrees.add(tree);
+      this.playerState.incrementTreesChopped();
       return;
     }
 

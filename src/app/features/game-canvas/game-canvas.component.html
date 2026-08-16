@@ -5,10 +5,18 @@
     <app-hud />
   }
 
-  @if (!threeScene.locked()) {
+  @if (gameFlow.phase() === 'not-started') {
     <div class="start-overlay" (click)="onStartClick()">
       <p>Klikni pro start</p>
-      <p class="hint">WASD pohyb · myš rozhlížení · Esc uvolní kurzor</p>
+      <p class="hint">WASD pohyb · myš rozhlížení · Esc pozastaví hru</p>
+    </div>
+  }
+
+  @if (gameFlow.phase() === 'paused') {
+    <div class="pause-overlay">
+      <h2>Pauza</h2>
+      <button type="button" (click)="onStartClick()">Pokračovat hrát</button>
+      <button type="button" (click)="onSaveAndExitClick()">Uložit a odejít do menu</button>
     </div>
   }
 </div>

@@ -1,12 +1,7 @@
 import { Injectable } from '@angular/core';
 import * as THREE from 'three';
 import type * as RapierNS from '@dimforge/rapier3d-compat';
-import { TerrainGenerator } from '../world/terrain-generator';
-
-const TERRAIN_WIDTH = 100;
-const TERRAIN_DEPTH = 200;
-const TERRAIN_SEGMENTS_X = 100;
-const TERRAIN_SEGMENTS_Z = 200;
+import { HeightGrid } from '../world/terrain-generator';
 
 const FIXED_TIMESTEP = 1 / 60;
 // Zábrana proti "spirále smrti" - kdyby jeden frame trval extrémně dlouho (např. tab přišel
@@ -26,13 +21,13 @@ export class PhysicsService {
 
   // Dynamický import - balíček nese WASM zabalené jako base64 (řádově MB), statický import
   // by ho natáhl do initial bundlu a rozbil produkční budget v angular.json.
-  async init(terrain: TerrainGenerator, gravity: number): Promise<void> {
+  async init(heightGrid: HeightGrid, gravity: number): Promise<void> {
     this.RAPIER = await import('@dimforge/rapier3d-compat');
     await this.RAPIER.init();
     this.world = new this.RAPIER.World({ x: 0, y: -gravity, z: 0 });
     this.world.timestep = FIXED_TIMESTEP;
     this.accumulator = 0;
-    this.buildTerrainHeightfield(terrain);
+    this.buildTerrainHeightfield(heightGrid);
   }
 
   // Rapier interně krokuje s pevným timestepem bez ohledu na argument step() - akumulátor
@@ -125,26 +120,30 @@ export class PhysicsService {
     this.world.removeRigidBody(handle.rigidBody);
   }
 
-  private buildTerrainHeightfield(terrain: TerrainGenerator): void {
+  private buildTerrainHeightfield(heightGrid: HeightGrid): void {
     // Pozor, obráceně než by se čekalo: empiricky ověřeno (viz debug session) - Rapier
     // heightfield(nrows, ncols, ...) má `nrows` podél lokální Z a `ncols` podél lokální X,
     // ne naopak. Se záměnou tvrdě sedí kolize jen na části mapy (zbytek se propadá).
-    const nrows = TERRAIN_SEGMENTS_Z;
-    const ncols = TERRAIN_SEGMENTS_X;
+    const nrows = heightGrid.segmentsZ;
+    const ncols = heightGrid.segmentsX;
     const heights = new Float32Array((nrows + 1) * (ncols + 1));
     // Column-major: heights[col * (nrows+1) + row], col ~ lokální X, row ~ lokální Z.
     // Svět je vycentrovaný na (0,0), stejně jako vykreslovaný terén v ThreeSceneService.buildScene().
+    // Hodnoty čteme z heightGrid předpočítaného jednou v ThreeSceneService.init() - žádný
+    // další noise výpočet zde.
     for (let col = 0; col <= ncols; col++) {
-      const x = -TERRAIN_WIDTH / 2 + (col / ncols) * TERRAIN_WIDTH;
       for (let row = 0; row <= nrows; row++) {
-        const z = -TERRAIN_DEPTH / 2 + (row / nrows) * TERRAIN_DEPTH;
-        heights[col * (nrows + 1) + row] = terrain.getHeight(x, z);
+        heights[col * (nrows + 1) + row] = heightGrid.getHeightAt(col, row);
       }
     }
 
     const body = this.world.createRigidBody(this.RAPIER.RigidBodyDesc.fixed());
     this.world.createCollider(
-      this.RAPIER.ColliderDesc.heightfield(nrows, ncols, heights, { x: TERRAIN_WIDTH, y: 1, z: TERRAIN_DEPTH }),
+      this.RAPIER.ColliderDesc.heightfield(nrows, ncols, heights, {
+        x: heightGrid.width,
+        y: 1,
+        z: heightGrid.depth
+      }),
       body
     );
   }
