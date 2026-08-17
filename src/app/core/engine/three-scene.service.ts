@@ -1,11 +1,13 @@
 import { Injectable, NgZone, effect, signal } from '@angular/core';
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
 import { BiomeId } from '../../shared/models/biome.model';
 import { QuatLike, Vec3Like } from '../../shared/models/save-game.model';
 import { SettingsService } from '../state/settings.service';
+import { TREE_CHUNK_SIZE } from '../world/chunk-grid';
 import { RoadNetwork } from '../world/road-network';
-import { HeightGrid, TerrainGenerator } from '../world/terrain-generator';
+import { FlatZone, HeightGrid, TerrainGenerator } from '../world/terrain-generator';
 import { TERRAIN_WIDTH, TERRAIN_DEPTH, TERRAIN_SEGMENTS_X, TERRAIN_SEGMENTS_Z } from '../world/world-config';
 import { CollisionService } from './collision.service';
 import { PhysicsService } from './physics.service';
@@ -17,6 +19,9 @@ export interface InteractableMeta {
   // instanceId je nastavený jen když zásah trefil THREE.InstancedMesh (dávka nedotčených
   // stromů, viz InstancedTreeBatch) - říká, KTERÁ konkrétní instance byla zasažena.
   readonly onInteract?: (hitPoint: THREE.Vector3, instanceId?: number) => void;
+  // Samostatný callback pro klávesu E - oddělený od onInteract (levé tlačítko/kácení),
+  // používá se pro akce typu "koupit", které nemají být na kliku.
+  readonly onUse?: () => void;
   readonly onGrabStart?: (hitPoint: THREE.Vector3, camera: THREE.Camera) => void;
   readonly onGrabTick?: (camera: THREE.Camera, delta: number) => void;
   readonly onGrabEnd?: (throwVelocity: THREE.Vector3) => void;
@@ -28,6 +33,9 @@ export interface LookTarget {
   readonly interactPrompt?: string;
   readonly distance: number;
 }
+
+const MICRO_RELIEF_FREQ = 0.6;
+const MICRO_RELIEF_AMPLITUDE = 0.05;
 
 const MOVE_SPEED = 6;
 const EYE_HEIGHT = 1.6;
@@ -41,6 +49,12 @@ const INTERACTION_DISTANCE = 4;
 const INTERACTABLE_PREFILTER_MARGIN = 6;
 const GRABBED_PROMPT = 'Pusť pro zahození';
 const THROW_SPEED = 8;
+const ATTACK_COOLDOWN_SECONDS = 0.5;
+
+// Poloviční úhlopříčka chunku (viz chunk-grid.ts, sdíleno s TreeService) - viz
+// filterNearbyInteractables níže, kde se používá k rozšíření prefiltru pro chunkované
+// instancované dávky stromů.
+const TREE_CHUNK_RADIUS = Math.SQRT2 * (TREE_CHUNK_SIZE / 2);
 
 const SLOPE_SAMPLE_STEP = 0.4;
 const UPHILL_SLOPE_PENALTY = 1.4;
@@ -62,6 +76,7 @@ export class ThreeSceneService {
   private controls!: PointerLockControls;
   private clock!: THREE.Clock;
   private frameId: number | null = null;
+  private readonly microReliefNoise = new ImprovedNoise();
 
   private readonly pressedKeys = new Set<string>();
   private velocityY = 0;
@@ -69,6 +84,7 @@ export class ThreeSceneService {
   private terrain = new TerrainGenerator();
 
   private readonly raycaster = new THREE.Raycaster();
+  private readonly interactableWorldPositionScratch = new THREE.Vector3();
   private readonly interactables = new Map<THREE.Object3D, InteractableMeta>();
   private interactableList: THREE.Object3D[] = [];
   private lastTargetId: string | null = null;
@@ -78,8 +94,17 @@ export class ThreeSceneService {
   private lastHitPoint: THREE.Vector3 | null = null;
   private lastHitInstanceId: number | null = null;
   private heldMeta: InteractableMeta | null = null;
+  private lastAttackTime = -Infinity;
+  private isPrimaryHeld = false;
+  private autoFireIntervalSeconds: number | null = null;
+
+  private fpsAccumulator = 0;
+  private fpsFrameCount = 0;
+  private lastFps = 0;
 
   private readonly tickables = new Set<(delta: number) => void>();
+  private readonly primaryActionListeners = new Set<() => void>();
+  private readonly secondaryActionListeners = new Set<() => void>();
   private readonly moveRightVector = new THREE.Vector3();
   private readonly moveForwardVector = new THREE.Vector3();
   private readonly cameraForward = new THREE.Vector3();
@@ -93,11 +118,30 @@ export class ThreeSceneService {
       this.velocityY = JUMP_SPEED * jumpMultiplier;
       this.grounded = false;
     }
+    if (event.code === 'KeyF' && !event.repeat && this.controls.isLocked) {
+      for (const fn of this.secondaryActionListeners) fn();
+    }
+    if (event.code === 'KeyE' && !event.repeat && this.controls.isLocked) {
+      this.lastResolvedMeta?.onUse?.();
+    }
   };
   private readonly onKeyUp = (event: KeyboardEvent) => this.pressedKeys.delete(event.code);
 
+  private readonly scrollListeners = new Set<(direction: 1 | -1) => void>();
+
+  private readonly onWheel = (event: WheelEvent) => {
+    if (!this.controls.isLocked) return;
+    const direction = event.deltaY > 0 ? 1 : -1;
+    for (const fn of this.scrollListeners) fn(direction);
+  };
+
   private readonly onMouseDown = (event: MouseEvent) => {
     if (!this.controls.isLocked || event.button !== 0 || this.heldMeta) return;
+    this.isPrimaryHeld = true;
+    const now = this.clock.getElapsedTime();
+    if (now - this.lastAttackTime < ATTACK_COOLDOWN_SECONDS) return;
+    this.lastAttackTime = now;
+    for (const fn of this.primaryActionListeners) fn();
     if (this.lastResolvedMeta?.onGrabStart && this.lastHitPoint) {
       const hitPoint = this.lastHitPoint;
       this.heldMeta = this.lastResolvedMeta;
@@ -119,7 +163,9 @@ export class ThreeSceneService {
   };
 
   private readonly onMouseUp = (event: MouseEvent) => {
-    if (event.button !== 0 || !this.heldMeta) return;
+    if (event.button !== 0) return;
+    this.isPrimaryHeld = false;
+    if (!this.heldMeta) return;
     this.camera.getWorldDirection(this.cameraForward);
     const throwVelocity = this.cameraForward.clone().multiplyScalar(THROW_SPEED);
     const heldMeta = this.heldMeta;
@@ -139,8 +185,9 @@ export class ThreeSceneService {
     });
   }
 
-  async init(canvas: HTMLCanvasElement, roads?: RoadNetwork): Promise<void> {
-    this.terrain = new TerrainGenerator(roads);
+  async init(canvas: HTMLCanvasElement, roads?: RoadNetwork, flatZones?: readonly FlatZone[]): Promise<void> {
+    this.terrain = new TerrainGenerator(roads, flatZones);
+    this.lastAttackTime = -Infinity;
     this.interactables.clear();
     this.interactableList = [];
     this.lastTargetId = null;
@@ -150,7 +197,11 @@ export class ThreeSceneService {
     this.lastHitPoint = null;
     this.lastHitInstanceId = null;
     this.heldMeta = null;
+    this.isPrimaryHeld = false;
+    this.autoFireIntervalSeconds = null;
     this.tickables.clear();
+    this.primaryActionListeners.clear();
+    this.secondaryActionListeners.clear();
     this.lookTargetSignal.set(null);
     this.collision.clear();
     const heightGrid = this.terrain.computeHeightGrid(
@@ -173,6 +224,9 @@ export class ThreeSceneService {
       600
     );
     this.camera.position.set(0, this.getGroundHeight(0, -40) + EYE_HEIGHT, -40);
+    // Kamera musí být součástí scény, jinak renderer.render(scene, camera) níže neprojde
+    // nic zavěšeného přes attachToCamera (view-model ruky) - traverzuje jen `scene`.
+    this.scene.add(this.camera);
 
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
@@ -190,7 +244,10 @@ export class ThreeSceneService {
       this.controls.pointerSpeed = 0;
       requestAnimationFrame(() => (this.controls.pointerSpeed = this.settings.lookSensitivity()));
     });
-    this.controls.addEventListener('unlock', () => this.zone.run(() => this.lockedSignal.set(false)));
+    this.controls.addEventListener('unlock', () => {
+      this.zone.run(() => this.lockedSignal.set(false));
+      this.isPrimaryHeld = false;
+    });
 
     this.clock = new THREE.Clock();
 
@@ -199,6 +256,7 @@ export class ThreeSceneService {
       document.addEventListener('keyup', this.onKeyUp);
       document.addEventListener('mousedown', this.onMouseDown);
       document.addEventListener('mouseup', this.onMouseUp);
+      document.addEventListener('wheel', this.onWheel, { passive: true });
       this.animate();
     });
   }
@@ -232,6 +290,53 @@ export class ThreeSceneService {
     this.scene.remove(object);
   }
 
+  // Připojí objekt jako dítě kamery (view-model, např. ruka hráče) - hýbe se automaticky
+  // s pohledem/pohybem, žádný extra sync není potřeba.
+  attachToCamera(object: THREE.Object3D): void {
+    this.camera.add(object);
+  }
+
+  detachFromCamera(object: THREE.Object3D): void {
+    this.camera.remove(object);
+  }
+
+  // Zavoláno při každém platném levém kliknutí (locked, LMB, nic se právě nedrží) bez
+  // ohledu na to, zda kliknutí trefilo interactable - pro vizuální feedback (švih ruky),
+  // ne herní logiku.
+  onPrimaryAction(fn: () => void): void {
+    this.primaryActionListeners.add(fn);
+  }
+
+  offPrimaryAction(fn: () => void): void {
+    this.primaryActionListeners.delete(fn);
+  }
+
+  // Zavoláno při stisku 'F' (locked, ne autorepeat) - vedlejší akce nezávislá na
+  // interactable pod kurzorem (např. "prohlédnutí" ruky/nástroje).
+  onSecondaryAction(fn: () => void): void {
+    this.secondaryActionListeners.add(fn);
+  }
+
+  offSecondaryAction(fn: () => void): void {
+    this.secondaryActionListeners.delete(fn);
+  }
+
+  // Zavoláno při otočení kolečkem myši (locked) - používá hotbar pro přepínání vybaveného
+  // předmětu. 1 = dolů/dál, -1 = nahoru/zpátky (stejná konvence jako event.deltaY).
+  onScroll(fn: (direction: 1 | -1) => void): void {
+    this.scrollListeners.add(fn);
+  }
+
+  offScroll(fn: (direction: 1 | -1) => void): void {
+    this.scrollListeners.delete(fn);
+  }
+
+  // Volá se při každé změně vybaveného nástroje (viz PlayerHandService) - null vypíná
+  // automatické opakování akce při podrženém LMB, číslo udává kadenci v sekundách.
+  setAutoFireInterval(seconds: number | null): void {
+    this.autoFireIntervalSeconds = seconds;
+  }
+
   registerInteractable(object: THREE.Object3D, meta: InteractableMeta): void {
     this.interactables.set(object, meta);
     this.interactableList = Array.from(this.interactables.keys());
@@ -258,6 +363,21 @@ export class ThreeSceneService {
     return this.terrain.getHeight(x, z);
   }
 
+  // Živá reference na pozici kamery - jen ke čtení, nikdy neuchovávat/mutovat mimo
+  // synchronní použití (viz TreeService.updateChunkVisibility).
+  getCameraPosition(): THREE.Vector3 {
+    return this.camera.position;
+  }
+
+  getFps(): number {
+    return this.lastFps;
+  }
+
+  getRendererInfo(): { calls: number; triangles: number } | null {
+    if (!this.renderer) return null;
+    return { calls: this.renderer.info.render.calls, triangles: this.renderer.info.render.triangles };
+  }
+
   getBiomeAt(x: number, z: number): BiomeId {
     return this.terrain.getBiomeAt(x, z);
   }
@@ -278,6 +398,7 @@ export class ThreeSceneService {
     document.removeEventListener('keyup', this.onKeyUp);
     document.removeEventListener('mousedown', this.onMouseDown);
     document.removeEventListener('mouseup', this.onMouseUp);
+    document.removeEventListener('wheel', this.onWheel);
     if (this.controls?.isLocked) {
       this.controls.unlock();
     }
@@ -293,7 +414,11 @@ export class ThreeSceneService {
     this.lastHitPoint = null;
     this.lastHitInstanceId = null;
     this.heldMeta = null;
+    this.isPrimaryHeld = false;
+    this.autoFireIntervalSeconds = null;
     this.tickables.clear();
+    this.primaryActionListeners.clear();
+    this.secondaryActionListeners.clear();
     this.lookTargetSignal.set(null);
     this.collision.clear();
   }
@@ -316,7 +441,18 @@ export class ThreeSceneService {
       const row = Math.floor(i / cols);
       const col = i % cols;
       const height = heightGrid.getHeightAt(col, row);
-      position.setZ(i, height);
+      // Jitter jde jen do vizuálního bufferu, ne do heightGrid samotného - fyzikální
+      // heightfield (PhysicsService.buildTerrainHeightfield) se staví z heightGrid dřív,
+      // než sem tato smyčka dojde (viz init() níže), takže o jitteru neví a zůstává
+      // nedotčený. Malá amplituda + 1 segment/unit = viditelně "rozbité" mikro-facety
+      // (žádoucí spolu s flatShading), bez znatelného posunu proti nejitrované výšce.
+      const x = -TERRAIN_WIDTH / 2 + (col / TERRAIN_SEGMENTS_X) * TERRAIN_WIDTH;
+      const z = -TERRAIN_DEPTH / 2 + (row / TERRAIN_SEGMENTS_Z) * TERRAIN_DEPTH;
+      const jitter = this.microReliefNoise.noise(x * MICRO_RELIEF_FREQ, z * MICRO_RELIEF_FREQ, 300);
+      // V dorovnané zóně (FlatZone) potlačit jitter na 0 - jinak by i pár centimetrů
+      // mikro-reliéfu mohlo prosvítat skrz dokonale plochou podlahu budovy.
+      const flatBlend = this.terrain.getFlatZoneBlend(x, z);
+      position.setZ(i, height + jitter * MICRO_RELIEF_AMPLITUDE * (1 - flatBlend));
 
       const color = heightGrid.getColorAt(col, row);
       colors[i * 3] = color.r;
@@ -329,7 +465,7 @@ export class ThreeSceneService {
 
     const ground = new THREE.Mesh(
       groundGeometry,
-      new THREE.MeshStandardMaterial({ vertexColors: true })
+      new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true })
     );
     ground.rotation.x = -Math.PI / 2;
     this.scene.add(ground);
@@ -343,6 +479,16 @@ export class ThreeSceneService {
   private animate(): void {
     this.frameId = requestAnimationFrame(() => this.animate());
     const delta = this.clock.getDelta();
+
+    // Prosté klouzavé FPS pro dev perf overlay (viz getFps) - přepočet ~2x/s, ne každý
+    // frame, aby číslo nebylo tak cukavé, že je nečitelné.
+    this.fpsFrameCount++;
+    this.fpsAccumulator += delta;
+    if (this.fpsAccumulator >= 0.5) {
+      this.lastFps = Math.round(this.fpsFrameCount / this.fpsAccumulator);
+      this.fpsFrameCount = 0;
+      this.fpsAccumulator = 0;
+    }
 
     for (const tick of this.tickables) tick(delta);
 
@@ -404,6 +550,7 @@ export class ThreeSceneService {
         this.heldMeta.onGrabTick?.(this.camera, delta);
       } else {
         this.updateLookTarget();
+        this.tickAutoFire();
       }
     } else {
       this.clearLookTarget();
@@ -454,18 +601,41 @@ export class ThreeSceneService {
   // Předfiltruje interactableList na kandidáty, které raycast má vůbec šanci trefit -
   // dřív se `raycaster.intersectObjects` volal proti celému seznamu bez ohledu na
   // vzdálenost, i když INTERACTION_DISTANCE je jen 4 jednotky. InstancedMesh (dávka
-  // nedotčených stromů) se nefiltruje vůbec - je jich konstantně málo (pár na variantu)
-  // bez ohledu na to, kolik stromů celkem existuje, takže se to nevyplatí.
+  // nedotčených stromů, viz TreeService) je teď rozdělená po chunkách - může jich být
+  // desítky - takže se filtruje stejným distančním testem jako běžné objekty, jen s
+  // marginem navíc rozšířeným o poloměr chunku (world pozice u těchto meshů je
+  // střed chunku, ne pozice jednotlivého stromu).
+  // Používá getWorldPosition, ne holé object.position - to druhé je lokální souřadnice
+  // vůči rodiči, což sedí jen pro objekty připojené přímo do scény (stromy). Zboží
+  // v obchodě (viz ShopEntity) je zanořené pod shop.group, takže by lokální position
+  // odpovídalo posunu na poličce, ne skutečné světové pozici.
   private filterNearbyInteractables(): THREE.Object3D[] {
     const maxDistSq = (INTERACTION_DISTANCE + INTERACTABLE_PREFILTER_MARGIN) ** 2;
+    const maxDistSqInstanced = (INTERACTION_DISTANCE + INTERACTABLE_PREFILTER_MARGIN + TREE_CHUNK_RADIUS) ** 2;
     const cameraPos = this.camera.position;
     return this.interactableList.filter((object) => {
-      if (object instanceof THREE.InstancedMesh) return true;
-      const dx = object.position.x - cameraPos.x;
-      const dy = object.position.y - cameraPos.y;
-      const dz = object.position.z - cameraPos.z;
-      return dx * dx + dy * dy + dz * dz <= maxDistSq;
+      object.getWorldPosition(this.interactableWorldPositionScratch);
+      const dx = this.interactableWorldPositionScratch.x - cameraPos.x;
+      const dy = this.interactableWorldPositionScratch.y - cameraPos.y;
+      const dz = this.interactableWorldPositionScratch.z - cameraPos.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      return distSq <= (object instanceof THREE.InstancedMesh ? maxDistSqInstanced : maxDistSq);
     });
+  }
+
+  // Opakuje interakční část onMouseDown (bez grab-start větve), dokud je LMB drženo a
+  // vybavený nástroj má nastavený autoFireIntervalSeconds (viz setAutoFireInterval) -
+  // sdílí lastAttackTime s manuálním klikem, takže po počátečním kliku navazuje v
+  // kadenci auto-fire bez dvojího odpálení hned při stisku.
+  private tickAutoFire(): void {
+    if (!this.isPrimaryHeld || this.autoFireIntervalSeconds === null) return;
+    const now = this.clock.getElapsedTime();
+    if (now - this.lastAttackTime < this.autoFireIntervalSeconds) return;
+    this.lastAttackTime = now;
+    for (const fn of this.primaryActionListeners) fn();
+    if (this.lastResolvedMeta && this.lastHitPoint) {
+      this.lastResolvedMeta.onInteract?.(this.lastHitPoint, this.lastHitInstanceId ?? undefined);
+    }
   }
 
   private clearLookTarget(): void {

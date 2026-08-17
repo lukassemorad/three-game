@@ -1,7 +1,7 @@
 import { TreeLifecycle } from './interactable.model';
 import { TreeVariant } from './tree.model';
 
-export const SAVE_SCHEMA_VERSION = 1;
+export const SAVE_SCHEMA_VERSION = 3;
 
 export interface Vec3Like {
   readonly x: number;
@@ -18,6 +18,7 @@ export interface QuatLike {
 
 export interface TreeSectorHit {
   readonly sector: number;
+  readonly hits: number;
   readonly hitY: number;
 }
 
@@ -26,6 +27,7 @@ export interface TreeSaveState {
   readonly rotation: QuatLike;
   readonly variant: TreeVariant;
   readonly sectorCount: number;
+  readonly hitsPerSector: number;
   readonly woodYield: number;
   readonly choppedSectorHits: readonly TreeSectorHit[];
   readonly lifecycle: TreeLifecycle;
@@ -38,6 +40,8 @@ export interface PlayerSaveState {
   readonly treesChoppedCount: number;
   readonly position: Vec3Like;
   readonly rotation: QuatLike;
+  readonly ownedItemIds: readonly string[];
+  readonly equippedItemId: string | null;
 }
 
 export interface IntactTreeSaveState {

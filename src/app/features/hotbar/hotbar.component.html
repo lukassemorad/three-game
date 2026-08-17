@@ -1,0 +1,9 @@
+@if (slots().length > 1) {
+  <div class="hotbar">
+    @for (item of slots(); track item.id; let i = $index) {
+      <div class="slot" [class.active]="i === activeIndex()">
+        <span class="icon">{{ item.icon }}</span>
+      </div>
+    }
+  </div>
+}

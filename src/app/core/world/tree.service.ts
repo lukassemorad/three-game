@@ -5,7 +5,9 @@ import { CollisionService } from '../engine/collision.service';
 import { ThreeSceneService } from '../engine/three-scene.service';
 import { PhysicsService } from '../engine/physics.service';
 import { IntactTreeSaveState, TreeSaveState } from '../../shared/models/save-game.model';
+import { InventoryService } from '../state/inventory.service';
 import { PlayerStateService } from '../state/player-state.service';
+import { getChunkCenter, getChunkKey, TREE_CHUNK_SIZE } from './chunk-grid';
 import { InstancedTreeBatch } from './instanced-tree-batch';
 import { getIntactTreeVisual, getTreeColliderInfo, TreeEntity, TreeVariant } from './tree.entity';
 
@@ -23,6 +25,26 @@ const WOOD_PRICE = 2;
 // skrz (tunneling). Tělo se proto vytvoří s rezervou nad nejvyšším bodem terénu pod
 // kmenem a nechá se dopadnout samo - pád o pár centimetrů je nepostřehnutelný.
 const LOG_SPAWN_CLEARANCE = 0.1;
+
+// Nedotčené stromy se pro rendering dělí do čtvercových chunků (viz chunk-grid.ts) - jedna
+// InstancedTreeBatch na dvojici (varianta, chunk) místo jedné dávky na celou mapu. Díky tomu
+// bounding sphere spočtená z lokálních instance matic (viz InstancedTreeBatch) pokrývá jen
+// jeden chunk, takže THREE.Frustum skutečně ořízne chunky mimo záběr - s jednou dávkou přes
+// celou mapu k tomu nikdy nedocházelo (sphere byla vždy tak velká, že protínala frustum skoro
+// vždy). Navíc chunky mimo dosah hráče se navíc periodicky skrývají (viz updateChunkVisibility).
+const CHUNK_VISIBILITY_INTERVAL = 0.2;
+// Hystereze mezi skrytím a zobrazením chunku - zabraňuje blikání, když se hráč zdržuje
+// přesně na hranici dvou vzdáleností.
+const CHUNK_HIDE_DISTANCE = 160;
+const CHUNK_SHOW_DISTANCE = 130;
+const CHUNK_HIDE_DISTANCE_SQ = CHUNK_HIDE_DISTANCE * CHUNK_HIDE_DISTANCE;
+const CHUNK_SHOW_DISTANCE_SQ = CHUNK_SHOW_DISTANCE * CHUNK_SHOW_DISTANCE;
+
+interface ChunkVisibilityEntry {
+  readonly center: { x: number; z: number };
+  readonly meshes: THREE.Object3D[];
+  visible: boolean;
+}
 
 // Uchopený kmen se nedrží rigidně - "prověšuje" se kolem uchopeného bodu (volný konec táhne
 // gravitace dolů, viz sag v tickGrab) a k cílové pozici/rotaci se tlumeně dohání pružinovým
@@ -88,6 +110,20 @@ function springTowardRotation(
   }
 }
 
+// Kvadrát vzdálenosti bodu (x, z) k nejbližšímu bodu úsečky start-end (obě ve 2D, .y
+// pole THREE.Vector2 tu značí souřadnici z - stejná konvence jako getFallenLogSegment).
+// Použito pro test "je kmen v prodejní zóně", kde bodová vzdálenost jen k bázi kmene
+// dávala falešně negativní výsledek pro dlouhé kmeny prostrčené oknem jen zčásti.
+function closestPointOnSegmentDistanceSq(start: THREE.Vector2, end: THREE.Vector2, x: number, z: number): number {
+  const segX = end.x - start.x;
+  const segZ = end.y - start.y;
+  const lengthSq = segX * segX + segZ * segZ;
+  const t = lengthSq < 1e-9 ? 0 : THREE.MathUtils.clamp(((x - start.x) * segX + (z - start.y) * segZ) / lengthSq, 0, 1);
+  const dx = x - (start.x + segX * t);
+  const dz = z - (start.y + segZ * t);
+  return dx * dx + dz * dz;
+}
+
 interface IntactTreeInfo {
   readonly variant: TreeVariant;
   readonly position: THREE.Vector3;
@@ -102,12 +138,18 @@ export class TreeService {
   // (instancované) stromy id ve tvaru "intact-N", pro povýšené/samostatné stromy tree.id.
   private readonly standingBodies = new Map<string, RapierNS.RigidBody>();
   // Nedotčené stromy vykreslované instancovaně (viz InstancedTreeBatch) - jedna dávka na
-  // variantu. intactTrees drží pozici/variantu, dokud strom nedostane první zásah.
-  private readonly instancedBatches = new Map<TreeVariant, InstancedTreeBatch>();
+  // dvojici (varianta, chunk), klíč `${variant}:${chunkKey}` (viz TREE_CHUNK_SIZE výše).
+  // intactTrees drží pozici/variantu, dokud strom nedostane první zásah.
+  private readonly instancedBatches = new Map<string, InstancedTreeBatch>();
   private readonly intactTrees = new Map<string, IntactTreeInfo>();
   private nextIntactTreeId = 0;
   private heldTree: TreeEntity | null = null;
   private tickableRegistered = false;
+
+  // Registr chunků pro visibility sweep (viz updateChunkVisibility) - sdružuje meshe napříč
+  // variantami ve stejném chunku, aby se `.visible` přepínalo po chunku, ne po variantě.
+  private readonly chunkVisibility = new Map<string, ChunkVisibilityEntry>();
+  private chunkVisibilityAccumulator = 0;
 
   // Stav aktuální grab session (platný jen dokud je heldTree nastavený). grabOffsetLocal je
   // bod zásahu paprsku v lokální soustavě kmene v čase uchopení - díky němu zůstává skutečně
@@ -123,13 +165,14 @@ export class TreeService {
   constructor(
     private readonly scene: ThreeSceneService,
     private readonly playerState: PlayerStateService,
+    private readonly inventory: InventoryService,
     private readonly collision: CollisionService,
     private readonly physics: PhysicsService
   ) {}
 
-  // Nedotčené stromy se nevykreslují jako individuální TreeEntity, ale jako pár
-  // InstancedTreeBatch dávek (jedna na variantu) - viz chopIntact() pro "povýšení"
-  // stromu na plnohodnotný TreeEntity při prvním zásahu.
+  // Nedotčené stromy se nevykreslují jako individuální TreeEntity, ale jako InstancedTreeBatch
+  // dávky - jedna na dvojici (varianta, chunk), viz TREE_CHUNK_SIZE. chopIntact() se stará
+  // o "povýšení" stromu na plnohodnotný TreeEntity při prvním zásahu.
   spawnTrees(entries: TreeSpawnEntry[]): void {
     if (!this.tickableRegistered) {
       this.tickableRegistered = true;
@@ -137,34 +180,47 @@ export class TreeService {
         this.physics.step(delta);
         this.tickFalling(delta);
         this.syncFallenTreesToCollision();
+        this.updateChunkVisibility(delta);
       });
     }
 
-    const byVariant = new Map<TreeVariant, TreeSpawnEntry[]>();
+    const byGroup = new Map<string, { variant: TreeVariant; chunkKey: string; entries: TreeSpawnEntry[] }>();
     for (const entry of entries) {
       const variant = entry.variant ?? 'oak';
-      const list = byVariant.get(variant);
-      if (list) list.push(entry);
-      else byVariant.set(variant, [entry]);
+      const chunkKey = getChunkKey(entry.position.x, entry.position.z, TREE_CHUNK_SIZE);
+      const groupKey = `${variant}:${chunkKey}`;
+      const group = byGroup.get(groupKey);
+      if (group) group.entries.push(entry);
+      else byGroup.set(groupKey, { variant, chunkKey, entries: [entry] });
     }
 
-    for (const [variant, variantEntries] of byVariant) {
+    for (const [groupKey, { variant, chunkKey, entries: groupEntries }] of byGroup) {
       const visual = getIntactTreeVisual(variant);
       const colliderInfo = getTreeColliderInfo(variant);
-      const batch = new InstancedTreeBatch(visual, variantEntries.length);
-      this.instancedBatches.set(variant, batch);
+      const center = getChunkCenter(chunkKey, TREE_CHUNK_SIZE);
+      const batch = new InstancedTreeBatch(visual, groupEntries.length, new THREE.Vector3(center.x, 0, center.z));
+      this.instancedBatches.set(groupKey, batch);
+
+      let chunkEntry = this.chunkVisibility.get(chunkKey);
+      if (!chunkEntry) {
+        chunkEntry = { center, meshes: [], visible: true };
+        this.chunkVisibility.set(chunkKey, chunkEntry);
+      }
 
       for (const mesh of batch.getMeshes()) {
         this.scene.addToScene(mesh);
+        chunkEntry.meshes.push(mesh);
+      }
+      for (const mesh of batch.getWedgeMeshes()) {
         this.scene.registerInteractable(mesh, {
-          id: `intact-batch-${variant}`,
+          id: `intact-batch-${groupKey}`,
           label: 'Strom',
           interactPrompt: `Klikni pro pokácení (${visual.sectorCount}/${visual.sectorCount} stran zbývá)`,
           onInteract: (hitPoint, instanceId) => this.chopIntact(variant, batch, hitPoint, instanceId)
         });
       }
 
-      for (const entry of variantEntries) {
+      for (const entry of groupEntries) {
         const id = `intact-${this.nextIntactTreeId++}`;
         batch.addInstance(id, entry.position);
         this.intactTrees.set(id, { variant, position: entry.position.clone() });
@@ -183,6 +239,34 @@ export class TreeService {
             colliderInfo.height
           )
         );
+      }
+
+      batch.computeBounds();
+    }
+  }
+
+  // Throttlovaný sweep (viz CHUNK_VISIBILITY_INTERVAL) - skryje meshe chunků, které jsou
+  // daleko od hráče, i kdyby zrovna byly ve frustum (frustum culling samo o sobě řeší jen
+  // "není v záběru", ne "je sice v záběru, ale zbytečně daleko"). Hystereze (HIDE > SHOW)
+  // zabraňuje blikání na hranici.
+  private updateChunkVisibility(delta: number): void {
+    if (this.chunkVisibility.size === 0) return;
+    this.chunkVisibilityAccumulator += delta;
+    if (this.chunkVisibilityAccumulator < CHUNK_VISIBILITY_INTERVAL) return;
+    this.chunkVisibilityAccumulator = 0;
+
+    const cameraPosition = this.scene.getCameraPosition();
+    for (const chunk of this.chunkVisibility.values()) {
+      const dx = chunk.center.x - cameraPosition.x;
+      const dz = chunk.center.z - cameraPosition.z;
+      const distSq = dx * dx + dz * dz;
+
+      if (chunk.visible && distSq > CHUNK_HIDE_DISTANCE_SQ) {
+        chunk.visible = false;
+        for (const mesh of chunk.meshes) mesh.visible = false;
+      } else if (!chunk.visible && distSq < CHUNK_SHOW_DISTANCE_SQ) {
+        chunk.visible = true;
+        for (const mesh of chunk.meshes) mesh.visible = true;
       }
     }
   }
@@ -259,10 +343,12 @@ export class TreeService {
         },
         variant: tree.variant,
         sectorCount: tree.state.sectorCount,
+        hitsPerSector: tree.state.hitsPerSector,
         woodYield: tree.state.resource.amount,
-        choppedSectorHits: Array.from(tree.state.choppedSectors.entries()).map(([sector, hitY]) => ({
+        choppedSectorHits: Array.from(tree.state.sectorHits.entries()).map(([sector, hits]) => ({
           sector,
-          hitY
+          hits,
+          hitY: tree.state.sectorHitY.get(sector) ?? 0
         })),
         lifecycle: tree.state.lifecycle,
         fallProgress: tree.state.fallProgress,
@@ -291,6 +377,7 @@ export class TreeService {
         position,
         variant: entry.variant,
         sectorCount: entry.sectorCount,
+        hitsPerSector: entry.hitsPerSector,
         woodYield: entry.woodYield,
         restore: {
           choppedSectorHits: entry.choppedSectorHits,
@@ -344,6 +431,8 @@ export class TreeService {
     this.fallenTrees.clear();
     this.standingBodies.clear();
     this.instancedBatches.clear();
+    this.chunkVisibility.clear();
+    this.chunkVisibilityAccumulator = 0;
     this.intactTrees.clear();
     this.nextIntactTreeId = 0;
     this.heldTree = null;
@@ -511,6 +600,30 @@ export class TreeService {
       .clone()
       .sub(this.grabOffsetLocal.clone().applyQuaternion(this.grabRotation));
 
+    // Vzorkuje bázi/půl/špičku kmene proti zdím budov (viz BuildingService.spawnBuilding) a
+    // vezme největší potřebnou korekci z nich - kmen se tak podél zdi vysune jen ve směru
+    // nejmenšího průniku (viz CollisionService.resolvePointAgainstBoxes), pohyb podél zdi
+    // (tangenciální složka) zůstává volný, takže kmen klouže, ne "zamrzne" na místě. Okenní
+    // mezera žádný box nemá, takže prostrčení kmene oknem do zóny prodeje zůstává možné.
+    const trunkAxis = new THREE.Vector3(0, 1, 0).applyQuaternion(this.grabRotation);
+    const trunkLength = tree.trunkHeight * tree.group.scale.y;
+    let correction: THREE.Vector3 | null = null;
+    let largestCorrectionSq = 0;
+    for (const t of [0, 0.5, 1]) {
+      const point = trunkOrigin.clone().addScaledVector(trunkAxis, trunkLength * t);
+      const resolved = this.collision.resolvePointAgainstBoxes(point, tree.colliderRadius);
+      const delta = new THREE.Vector3(resolved.x - point.x, resolved.y - point.y, resolved.z - point.z);
+      const deltaSq = delta.lengthSq();
+      if (deltaSq > largestCorrectionSq) {
+        largestCorrectionSq = deltaSq;
+        correction = delta;
+      }
+    }
+    if (correction) {
+      trunkOrigin.add(correction);
+      this.grabPivotPosition.add(correction);
+    }
+
     this.physics.setKinematicTarget(tree.physicsHandle, trunkOrigin, this.grabRotation);
     tree.applyPhysicsTransform(trunkOrigin, this.grabRotation);
   }
@@ -532,8 +645,12 @@ export class TreeService {
     return `Klikni pro pokácení (${remaining}/${tree.state.sectorCount} stran zbývá)`;
   }
 
+  private getAxeDamage(): number {
+    return this.inventory.activeItem().damage;
+  }
+
   private chop(tree: TreeEntity, hitPoint: THREE.Vector3): void {
-    const result = tree.registerHit(hitPoint);
+    const result = tree.registerHit(hitPoint, this.getAxeDamage());
 
     if (result.outcome === 'alreadyFallen') {
       return;
@@ -553,21 +670,28 @@ export class TreeService {
       return;
     }
 
-    const promptOverride =
-      result.outcome === 'repeatedSector'
-        ? `Tahle strana je už odštípnutá — zkus jinou (${result.sectorsRemaining}/${tree.state.sectorCount} stran zbývá)`
-        : undefined;
+    let promptOverride: string | undefined;
+    if (result.outcome === 'repeatedSector') {
+      promptOverride = `Tahle strana je už odštípnutá — zkus jinou (${result.sectorsRemaining}/${tree.state.sectorCount} stran zbývá)`;
+    } else if (result.outcome === 'sectorProgress') {
+      promptOverride = `Zásah! Ještě ${result.hitsRemaining} do zlomení strany (${result.sectorsRemaining}/${tree.state.sectorCount} stran zbývá)`;
+    } else if (result.outcome === 'sectorFelled') {
+      promptOverride = `Strana pokácena! Zkus jinou stranu (${result.sectorsRemaining}/${tree.state.sectorCount} zbývá)`;
+    }
     this.registerTree(tree, promptOverride);
   }
 
   // Volá BuildingService každý tick pro zónu výkupny - kmen ležící v dosahu zóny se zničí
-  // (odstraní ze scény/fyziky/kolizí) a hráči se za prodané dřevo připíšou peníze.
+  // (odstraní ze scény/fyziky/kolizí) a hráči se za prodané dřevo připíšou peníze. Testuje se
+  // nejbližší bod CELÉ délky kmene (ne jen báze) - dlouhý kmen prostrčený oknem tak, že báze
+  // zůstala venku a špička je hluboko v zóně, se tak prodá stejně jako kmen položený celý uvnitř.
   collectLogsInZone(zone: { x: number; z: number; radius: number }): void {
     for (const tree of [...this.fallenTrees]) {
       if (tree === this.heldTree) continue;
-      const dx = tree.group.position.x - zone.x;
-      const dz = tree.group.position.z - zone.z;
-      if (dx * dx + dz * dz > zone.radius * zone.radius) continue;
+      const segment = tree.getFallenLogSegment();
+      if (!segment) continue;
+      const distSq = closestPointOnSegmentDistanceSq(segment.start, segment.end, zone.x, zone.z);
+      if (distSq > zone.radius * zone.radius) continue;
       this.removeFallenTree(tree);
       this.playerState.addMoney(tree.state.resource.amount * WOOD_PRICE);
     }

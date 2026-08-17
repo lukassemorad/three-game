@@ -1,7 +1,9 @@
 import { Injectable } from '@angular/core';
 import { SaveGame, SAVE_SCHEMA_VERSION } from '../../shared/models/save-game.model';
+import { HAND_ITEM } from '../../shared/models/item.model';
 import { ThreeSceneService } from '../engine/three-scene.service';
 import { TreeService } from '../world/tree.service';
+import { InventoryService } from './inventory.service';
 import { PlayerStateService } from './player-state.service';
 
 const SAVE_STORAGE_KEY = 'three-game:save';
@@ -11,6 +13,7 @@ export class SaveGameService {
   constructor(
     private readonly threeScene: ThreeSceneService,
     private readonly playerState: PlayerStateService,
+    private readonly inventory: InventoryService,
     private readonly treeService: TreeService
   ) {}
 
@@ -33,7 +36,9 @@ export class SaveGameService {
         money: this.playerState.money(),
         treesChoppedCount: this.playerState.treesChoppedCount(),
         position: transform.position,
-        rotation: transform.quaternion
+        rotation: transform.quaternion,
+        ownedItemIds: this.inventory.ownedIds(),
+        equippedItemId: this.inventory.activeItem().id === HAND_ITEM.id ? null : this.inventory.activeItem().id
       },
       intactTrees: intact,
       trees: detailed

@@ -48,6 +48,20 @@ export class BuildingService {
       );
     }
 
+    // World-space kopie stejných boxů pro CollisionService - používá je TreeService.tickGrab,
+    // aby nesený kmen nemohl projít zdí (Rapier kinematické tělo samo kolize netestuje).
+    this.collision.registerBoxes(
+      building.id,
+      building.wallBoxColliders.map((wall) => ({
+        center: {
+          x: building.group.position.x + wall.center.x,
+          y: building.group.position.y + wall.center.y,
+          z: building.group.position.z + wall.center.z
+        },
+        halfExtents: wall.halfExtents
+      }))
+    );
+
     for (let i = 0; i < building.groundWallSegments.length; i++) {
       const segment = building.groundWallSegments[i];
       this.registerGroundSegmentColliders(building, segment, i);

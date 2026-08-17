@@ -3,6 +3,11 @@
 
   @if (threeScene.locked()) {
     <app-hud />
+    <app-hotbar />
+  }
+
+  @if (showPerfOverlay) {
+    <app-perf-overlay />
   }
 
   @if (gameFlow.phase() === 'not-started') {

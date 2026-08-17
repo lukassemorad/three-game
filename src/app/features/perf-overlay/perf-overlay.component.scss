@@ -1,0 +1,19 @@
+:host {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.perf-overlay {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.55);
+  color: #6f6;
+  font-family: monospace;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre;
+}

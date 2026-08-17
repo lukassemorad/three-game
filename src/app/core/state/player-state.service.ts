@@ -1,5 +1,9 @@
 import { Injectable, signal } from '@angular/core';
 
+// TESTOVACÍ SEED - startovní peníze nové hry, aby šel snadno otestovat nákup v obchodě
+// bez nutnosti nejdřív nasekat dřevo. Před ostrým nasazením vrátit zpět na 0.
+const TESTING_START_MONEY = 10000;
+
 @Injectable({ providedIn: 'root' })
 export class PlayerStateService {
   private readonly moneySignal = signal(0);
@@ -12,6 +16,12 @@ export class PlayerStateService {
     this.moneySignal.update((m) => m + amount);
   }
 
+  spendMoney(amount: number): boolean {
+    if (this.moneySignal() < amount) return false;
+    this.moneySignal.update((m) => m - amount);
+    return true;
+  }
+
   incrementTreesChopped(): void {
     this.treesChoppedCountSignal.update((count) => count + 1);
   }
@@ -22,7 +32,7 @@ export class PlayerStateService {
   }
 
   reset(): void {
-    this.moneySignal.set(0);
+    this.moneySignal.set(TESTING_START_MONEY);
     this.treesChoppedCountSignal.set(0);
   }
 }

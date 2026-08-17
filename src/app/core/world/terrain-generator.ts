@@ -14,6 +14,22 @@ export const BIOME_BOUNDARY_Z = 0;
 const BIOME_TRANSITION_WIDTH = 30;
 const HIGHLANDS_ELEVATION = 12;
 
+// Lokální "podlaha" pod budovou - v okruhu `radius` je terén dorovnaný na jednu výšku (tu,
+// kterou by měl přirozeně přesně ve středu zóny, případně navýšenou o `raise`), takže
+// podlaha budovy nemůže terénem prosvítat ani nad ním viset. Mezi `radius` a
+// `radius + feather` se dorovnaná výška hladce vrací k přirozenému terénu - stejný
+// smoothstep-blend vzor jako u getRoadBlend. `raise` (výchozí 0) navíc terén v zóně
+// nadzvedne nad okolí - malý "podstavec", který s rezervou překryje mikro-reliéfní jitter
+// vizuálního meshe (viz MICRO_RELIEF_AMPLITUDE v three-scene.service.ts) a dá budově
+// přirozený náběh/schůdek u vchodu místo toho, aby ležela přesně v úrovni okolní trávy.
+export interface FlatZone {
+  readonly x: number;
+  readonly z: number;
+  readonly radius: number;
+  readonly feather: number;
+  readonly raise?: number;
+}
+
 export const MOUNTAIN_BOUNDARY_Z = 75;
 const MOUNTAIN_TRANSITION_WIDTH = 60;
 const MOUNTAIN_ELEVATION = 26;
@@ -78,6 +94,13 @@ const GROUND_MID_HEIGHT = 6;
 const GROUND_HIGH_HEIGHT = 12;
 const GROUND_SNOW_HEIGHT = 24;
 
+// Samostatný noise (jiné pole než výškový this.noise) a vyšší frekvence než tvar terénu -
+// jinak by skvrny 1:1 kopírovaly reliéf/výškové pásy a působily jako "duch" tvaru terénu
+// místo nezávislé nerovnoměrnosti barvy uvnitř pásu.
+const GROUND_MOTTLE_FREQ = 0.4;
+const GROUND_MOTTLE_LIGHTNESS = 0.06;
+const groundMottleNoise = new ImprovedNoise();
+
 function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
   return t * t * (3 - 2 * t);
@@ -100,8 +123,14 @@ export interface HeightGrid {
 
 export class TerrainGenerator {
   private readonly noise = new ImprovedNoise();
+  // Přirozená (nedorovnaná) výška ve středu každé flatZone, spočtená jednou v konstruktoru -
+  // je to cíl, ke kterému se dorovnává celý okruh, takže budova sedí přesně na výšce, kterou
+  // by měla ve svém středu i bez dorovnání (žádný umělý skok).
+  private readonly flatZoneTargets: readonly number[];
 
-  constructor(private readonly roads?: RoadNetwork) {}
+  constructor(private readonly roads?: RoadNetwork, private readonly flatZones: readonly FlatZone[] = []) {
+    this.flatZoneTargets = this.flatZones.map((zone) => this.getNaturalHeight(zone.x, zone.z) + (zone.raise ?? 0));
+  }
 
   getBiomeBlend(x: number, z: number): number {
     return getBiomeBlendAt(x, z);
@@ -116,6 +145,39 @@ export class TerrainGenerator {
   }
 
   getHeight(x: number, z: number): number {
+    const natural = this.getNaturalHeight(x, z);
+    return this.applyFlatZones(x, z, natural);
+  }
+
+  private applyFlatZones(x: number, z: number, natural: number): number {
+    let height = natural;
+    for (let i = 0; i < this.flatZones.length; i++) {
+      const zone = this.flatZones[i];
+      const blend = this.getZoneBlend(zone, x, z);
+      if (blend <= 0) continue;
+      height += (this.flatZoneTargets[i] - height) * blend;
+    }
+    return height;
+  }
+
+  // Kolik (0..1) je bod uvnitř nějaké flatZone - použito i mimo výškovou funkci, k potlačení
+  // vizuálního mikro-reliéfního jitteru (ThreeSceneService.buildScene) v dorovnané ploše.
+  getFlatZoneBlend(x: number, z: number): number {
+    let maxBlend = 0;
+    for (const zone of this.flatZones) {
+      const blend = this.getZoneBlend(zone, x, z);
+      if (blend > maxBlend) maxBlend = blend;
+    }
+    return maxBlend;
+  }
+
+  private getZoneBlend(zone: FlatZone, x: number, z: number): number {
+    const distance = Math.hypot(x - zone.x, z - zone.z);
+    if (distance >= zone.radius + zone.feather) return 0;
+    return 1 - smoothstep(zone.radius, zone.radius + zone.feather, distance);
+  }
+
+  private getNaturalHeight(x: number, z: number): number {
     const base = this.noise.noise(x * TERRAIN_FREQ_1, z * TERRAIN_FREQ_1, 0);
     const detail = this.noise.noise(x * TERRAIN_FREQ_2, z * TERRAIN_FREQ_2, 10);
     const mountainBlend = this.getMountainBlend(x, z);
@@ -170,7 +232,7 @@ export class TerrainGenerator {
   }
 
   getColor(height: number, x?: number, z?: number): THREE.Color {
-    const groundColor = this.getGroundColor(height);
+    const groundColor = this.getGroundColor(height, x, z);
 
     if (x === undefined || z === undefined) return groundColor;
     const roadBlend = this.getRoadBlend(x, z);
@@ -178,26 +240,31 @@ export class TerrainGenerator {
     return groundColor.lerp(this.roads!.surfaceColor, roadBlend);
   }
 
-  private getGroundColor(height: number): THREE.Color {
+  private getGroundColor(height: number, x?: number, z?: number): THREE.Color {
+    let color: THREE.Color;
     if (height <= GROUND_MID_HEIGHT) {
-      return new THREE.Color().lerpColors(
+      color = new THREE.Color().lerpColors(
         GROUND_LOW_COLOR,
         GROUND_MID_COLOR,
         smoothstep(0, GROUND_MID_HEIGHT, height)
       );
-    }
-    if (height <= GROUND_HIGH_HEIGHT) {
-      return new THREE.Color().lerpColors(
+    } else if (height <= GROUND_HIGH_HEIGHT) {
+      color = new THREE.Color().lerpColors(
         GROUND_MID_COLOR,
         GROUND_HIGH_COLOR,
         smoothstep(GROUND_MID_HEIGHT, GROUND_HIGH_HEIGHT, height)
       );
+    } else {
+      color = new THREE.Color().lerpColors(
+        GROUND_HIGH_COLOR,
+        GROUND_SNOW_COLOR,
+        smoothstep(GROUND_HIGH_HEIGHT, GROUND_SNOW_HEIGHT, height)
+      );
     }
-    return new THREE.Color().lerpColors(
-      GROUND_HIGH_COLOR,
-      GROUND_SNOW_COLOR,
-      smoothstep(GROUND_HIGH_HEIGHT, GROUND_SNOW_HEIGHT, height)
-    );
+
+    if (x === undefined || z === undefined) return color;
+    const mottle = groundMottleNoise.noise(x * GROUND_MOTTLE_FREQ, z * GROUND_MOTTLE_FREQ, 200);
+    return color.offsetHSL(0, 0, mottle * GROUND_MOTTLE_LIGHTNESS);
   }
 
   private getRoadBlend(x: number, z: number): number {
