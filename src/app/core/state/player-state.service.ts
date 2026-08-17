@@ -2,7 +2,7 @@ import { Injectable, signal } from '@angular/core';
 
 // TESTOVACÍ SEED - startovní peníze nové hry, aby šel snadno otestovat nákup v obchodě
 // bez nutnosti nejdřív nasekat dřevo. Před ostrým nasazením vrátit zpět na 0.
-const TESTING_START_MONEY = 10000;
+const TESTING_START_MONEY = 0;
 
 @Injectable({ providedIn: 'root' })
 export class PlayerStateService {
