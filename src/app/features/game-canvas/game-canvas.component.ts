@@ -16,6 +16,7 @@ import { PlayerStateService } from '../../core/state/player-state.service';
 import { SaveGameService } from '../../core/state/save-game.service';
 import { ThreeSceneService } from '../../core/engine/three-scene.service';
 import { BuildingService } from '../../core/world/building.service';
+import { FrogService } from '../../core/world/frog.service';
 import { ShopService } from '../../core/world/shop.service';
 import { createCircleExclusionZone, createRoadExclusionZone } from '../../core/world/placement-exclusion';
 import { RoadNetwork } from '../../core/world/road-network';
@@ -40,6 +41,14 @@ const SHOP_EXCLUSION_RADIUS = 6;
 // terénu (5 cm) a zároveň dá obchodu malý přirozený náběh/podstavec (viz schůdek u vchodu
 // v shop.entity.ts).
 const SHOP_FLAT_ZONE = { x: SHOP_POSITION.x, z: SHOP_POSITION.z, radius: 6, feather: 4, raise: 0.18 };
+
+// Pevné pozice v trávě kolem výkupny/obchodu, s rezervou od jejich vylučovacích zón i od
+// hlavní cesty - biom meadow tu vychází spolehlivě i s maximálním možným warpem hranice.
+const FROG_POSITIONS = [
+  { x: 18, z: -50 },
+  { x: 5, z: -62 },
+  { x: 16, z: -78 }
+];
 
 const MAIN_ROAD: RoadDefinition = {
   points: [
@@ -72,6 +81,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     private readonly treeService: TreeService,
     private readonly buildingService: BuildingService,
     private readonly shopService: ShopService,
+    private readonly frogService: FrogService,
     private readonly playerHandService: PlayerHandService,
     private readonly playerState: PlayerStateService,
     private readonly inventory: InventoryService,
@@ -128,6 +138,10 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
       position: groundedVec3(SHOP_POSITION.x, SHOP_POSITION.z)
     });
     this.playerHandService.spawn();
+
+    this.frogService
+      .spawnFrogs(FROG_POSITIONS.map(({ x, z }) => groundedVec3(x, z)))
+      .catch((err) => console.error(err));
   }
 
   ngOnDestroy(): void {
@@ -135,6 +149,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.shopService.dispose();
     this.treeService.dispose();
     this.playerHandService.dispose();
+    this.frogService.dispose();
     this.threeScene.dispose();
   }
 
