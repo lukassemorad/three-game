@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { ImprovedNoise } from 'three/addons/math/ImprovedNoise.js';
 import { BiomeId } from '../../shared/models/biome.model';
 import { RoadNetwork } from './road-network';
+import { WorldBounds } from './world-config';
 
 const TERRAIN_FREQ_1 = 0.05;
 const TERRAIN_AMPLITUDE_1 = 1.6;
@@ -57,6 +58,25 @@ export function getBiomeAt(x: number, z: number): BiomeId {
   const shiftedZ = getBiomeShiftedZ(x, z);
   if (shiftedZ < BIOME_BOUNDARY_Z) return 'meadow';
   return shiftedZ < MOUNTAIN_BOUNDARY_Z ? 'highlands' : 'mountains';
+}
+
+export interface BiomeZRange {
+  readonly biome: BiomeId;
+  readonly minZ: number;
+  readonly maxZ: number;
+}
+
+// Hranice biomu je nakloněná (tilt) a zvlněná (warp noise), ne konstantní z - tyhle rozsahy
+// proto slouží jen jako padding pro efektivní vzorkování (kam vůbec náhodné body v daném
+// biomu cílit, viz tree-placement.ts/vegetation-placement.ts), skutečné rozhodnutí vždy dělá
+// getBiomeAt(x, z).
+export function getBiomeZRanges(bounds: WorldBounds): readonly BiomeZRange[] {
+  const boundaryMaxShift = (Math.abs(BIOME_BOUNDARY_TILT) * (bounds.maxX - bounds.minX)) / 2 + BIOME_WARP_AMPLITUDE;
+  return [
+    { biome: 'meadow', minZ: bounds.minZ, maxZ: BIOME_BOUNDARY_Z + boundaryMaxShift },
+    { biome: 'highlands', minZ: BIOME_BOUNDARY_Z - boundaryMaxShift, maxZ: MOUNTAIN_BOUNDARY_Z + boundaryMaxShift },
+    { biome: 'mountains', minZ: MOUNTAIN_BOUNDARY_Z - boundaryMaxShift, maxZ: bounds.maxZ }
+  ];
 }
 
 function getBiomeBlendAt(x: number, z: number): number {

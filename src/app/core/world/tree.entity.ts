@@ -3,6 +3,7 @@ import { Choppable, TreeLifecycle } from '../../shared/models/interactable.model
 import { QuatLike, TreeSectorHit, Vec3Like } from '../../shared/models/save-game.model';
 import { TreeVariant } from '../../shared/models/tree.model';
 import { FallenLogHandle } from '../engine/physics.service';
+import { getVisualVariation, VisualVariation } from './position-hash';
 
 export type { TreeVariant };
 
@@ -50,33 +51,16 @@ interface TreeVariantDefinition {
 
 const FALL_DURATION_SECONDS = 1.3;
 
-// Deterministický pseudo-náhodný hash z world pozice ([0,1)) - stejná pozice dá vždy
-// stejnou hodnotu. Díky tomu je vizuální variace (rotace/škála/barevný tón) stabilní i po
-// znovunačtení uloženého stavu (ten ukládá jen pozici) a je IDENTICKÁ pro nedotčenou
-// instanci v InstancedTreeBatch i pro TreeEntity povýšené na stejné pozici - žádný
-// vizuální "pop" při prvním zásahu (viz getTreeVisualVariation, InstancedTreeBatch.addInstance).
-function positionHash(x: number, z: number): number {
-  const s = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453;
-  return s - Math.floor(s);
-}
+// Vizuální variace stromu (rotace/škála/barevný tón) je IDENTICKÁ pro nedotčenou instanci v
+// InstancedTreeBatch i pro TreeEntity povýšené na stejné pozici - žádný vizuální "pop" při
+// prvním zásahu (viz InstancedTreeBatch.addInstance). Sdílený position-hash mechanismus viz
+// position-hash.ts.
+const TREE_VARIATION_RANGE = { scaleMin: 0.9, scaleRange: 0.2, tintMin: 0.85, tintRange: 0.3 };
 
-const TREE_SCALE_MIN = 0.9;
-const TREE_SCALE_RANGE = 0.2;
-const TREE_TINT_MIN = 0.85;
-const TREE_TINT_RANGE = 0.3;
-
-export interface TreeVisualVariation {
-  readonly rotationY: number;
-  readonly scale: number;
-  readonly tint: number;
-}
+export type TreeVisualVariation = VisualVariation;
 
 export function getTreeVisualVariation(x: number, z: number): TreeVisualVariation {
-  return {
-    rotationY: positionHash(x, z) * Math.PI * 2,
-    scale: TREE_SCALE_MIN + positionHash(x + 71.3, z - 13.7) * TREE_SCALE_RANGE,
-    tint: TREE_TINT_MIN + positionHash(x - 45.2, z + 88.9) * TREE_TINT_RANGE
-  };
+  return getVisualVariation(x, z, TREE_VARIATION_RANGE);
 }
 
 // Vrací tónovaný klon materiálu (ne sdílenou instanci) - jinak by ztmavení/zesvětlení

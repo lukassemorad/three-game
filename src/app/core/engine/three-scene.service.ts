@@ -502,7 +502,11 @@ export class ThreeSceneService {
       this.fpsAccumulator = 0;
     }
 
-    for (const tick of this.tickables) tick(delta);
+    // Při pauze (pointer lock uvolněný) má "opravdu" zamrznout celý svět, ne jen hráč -
+    // nulové delta pro tickables zastaví vítr v trávě, animace/AI zvířat atd., aniž by bylo
+    // potřeba zásah v každém jednotlivém subsystému zvlášť.
+    const effectiveDelta = this.controls.isLocked ? delta : 0;
+    for (const tick of this.tickables) tick(effectiveDelta);
 
     if (this.controls.isLocked) {
       this.moveRightVector.setFromMatrixColumn(this.camera.matrix, 0);

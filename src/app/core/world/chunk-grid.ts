@@ -8,6 +8,10 @@
 // duplicity, které by se časem mohly rozejít.
 export const TREE_CHUNK_SIZE = 40;
 
+// Menší než TREE_CHUNK_SIZE - VegetationService drží řádově víc instancí na mnohem kratší
+// viditelnostní dosah (viz VegetationService), jemnější chunky proto lépe cílí, co skrýt.
+export const VEGETATION_CHUNK_SIZE = 20;
+
 export function getChunkKey(x: number, z: number, chunkSize: number): string {
   const cx = Math.floor(x / chunkSize);
   const cz = Math.floor(z / chunkSize);

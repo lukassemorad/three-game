@@ -15,6 +15,7 @@ import { InventoryService } from '../../core/state/inventory.service';
 import { PlayerStateService } from '../../core/state/player-state.service';
 import { SaveGameService } from '../../core/state/save-game.service';
 import { ThreeSceneService } from '../../core/engine/three-scene.service';
+import { generateAnimalPlacements } from '../../core/world/animal-placement';
 import { BuildingService } from '../../core/world/building.service';
 import { FrogService } from '../../core/world/frog.service';
 import { ShopService } from '../../core/world/shop.service';
@@ -24,6 +25,8 @@ import { StagService } from '../../core/world/stag.service';
 import { generateTreePositions } from '../../core/world/tree-placement';
 import { PlayerHandService } from '../../core/world/player-hand.service';
 import { TreeService } from '../../core/world/tree.service';
+import { generateVegetationPlacements } from '../../core/world/vegetation-placement';
+import { VegetationService } from '../../core/world/vegetation.service';
 import { WORLD_BOUNDS } from '../../core/world/world-config';
 import { RoadDefinition } from '../../shared/models/road.model';
 import { HotbarComponent } from '../hotbar/hotbar.component';
@@ -42,23 +45,6 @@ const SHOP_EXCLUSION_RADIUS = 6;
 // terénu (5 cm) a zároveň dá obchodu malý přirozený náběh/podstavec (viz schůdek u vchodu
 // v shop.entity.ts).
 const SHOP_FLAT_ZONE = { x: SHOP_POSITION.x, z: SHOP_POSITION.z, radius: 6, feather: 4, raise: 0.18 };
-
-// Pevné pozice v trávě kolem výkupny/obchodu, s rezervou od jejich vylučovacích zón i od
-// hlavní cesty - biom meadow tu vychází spolehlivě i s maximálním možným warpem hranice.
-const FROG_POSITIONS = [
-  { x: 18, z: -50 },
-  { x: 5, z: -62 },
-  { x: 16, z: -78 }
-];
-
-// Západní strana mapy - opačně od budovy/obchodu/žab (ty jsou na x>=5) i od hlavní cesty
-// (láme se přes x=-13 u z=-68) - biom meadow tu vychází spolehlivě i s maximálním možným
-// warpem hranice (viz getBiomeAt v terrain-generator.ts).
-const STAG_POSITIONS = [
-  { x: -22, z: -60 },
-  { x: -28, z: -70 },
-  { x: -20, z: -78 }
-];
 
 const MAIN_ROAD: RoadDefinition = {
   points: [
@@ -89,6 +75,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     protected readonly threeScene: ThreeSceneService,
     protected readonly gameFlow: GameFlowService,
     private readonly treeService: TreeService,
+    private readonly vegetationService: VegetationService,
     private readonly buildingService: BuildingService,
     private readonly shopService: ShopService,
     private readonly frogService: FrogService,
@@ -117,6 +104,15 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     const groundedVec3 = (x: number, z: number) =>
       new THREE.Vector3(x, this.threeScene.getGroundHeight(x, z), z);
 
+    // Čistý výpočet bez vedlejších efektů - potřebuje ho jak větev nového save (stromy), tak
+    // vegetace, která se (na rozdíl od stromů) generuje znovu při každém loadu bez ohledu na
+    // to, jestli save existuje (nemá žádný uložený stav, viz VegetationService).
+    const exclusionZones = [
+      createRoadExclusionZone(roadNetwork, ROAD_TREE_CLEARANCE),
+      createCircleExclusionZone(BUILDING_POSITION, BUILDING_EXCLUSION_RADIUS),
+      createCircleExclusionZone(SHOP_POSITION, SHOP_EXCLUSION_RADIUS)
+    ];
+
     const save = this.saveGame.load();
     if (save) {
       this.treeService.restoreTrees({ intact: save.intactTrees, detailed: save.trees });
@@ -129,11 +125,6 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     } else {
       this.playerState.reset();
       this.inventory.reset();
-      const exclusionZones = [
-        createRoadExclusionZone(roadNetwork, ROAD_TREE_CLEARANCE),
-        createCircleExclusionZone(BUILDING_POSITION, BUILDING_EXCLUSION_RADIUS),
-        createCircleExclusionZone(SHOP_POSITION, SHOP_EXCLUSION_RADIUS)
-      ];
       this.treeService.spawnTrees(
         generateTreePositions(WORLD_BOUNDS, exclusionZones).map(({ x, z, variant }) => ({
           position: groundedVec3(x, z),
@@ -141,6 +132,15 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
         }))
       );
     }
+
+    this.vegetationService
+      .spawnVegetation(
+        generateVegetationPlacements(WORLD_BOUNDS, exclusionZones).map(({ x, z, variant }) => ({
+          position: groundedVec3(x, z),
+          variant
+        }))
+      )
+      .catch((err) => console.error(err));
 
     this.buildingService.spawnBuilding({
       position: groundedVec3(BUILDING_POSITION.x, BUILDING_POSITION.z)
@@ -150,12 +150,18 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     });
     this.playerHandService.spawn();
 
+    const animalPlacements = generateAnimalPlacements(WORLD_BOUNDS, exclusionZones);
+
     this.frogService
-      .spawnFrogs(FROG_POSITIONS.map(({ x, z }) => groundedVec3(x, z)))
+      .spawnFrogs(
+        animalPlacements.filter((p) => p.variant === 'frog').map(({ x, z }) => groundedVec3(x, z))
+      )
       .catch((err) => console.error(err));
 
     this.stagService
-      .spawnStags(STAG_POSITIONS.map(({ x, z }) => groundedVec3(x, z)))
+      .spawnStags(
+        animalPlacements.filter((p) => p.variant === 'stag').map(({ x, z }) => groundedVec3(x, z))
+      )
       .catch((err) => console.error(err));
   }
 
@@ -163,6 +169,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.buildingService.dispose();
     this.shopService.dispose();
     this.treeService.dispose();
+    this.vegetationService.dispose();
     this.playerHandService.dispose();
     this.frogService.dispose();
     this.stagService.dispose();

@@ -2,13 +2,8 @@ import { TreeVariant } from '../../shared/models/tree.model';
 import { BIOMES } from './biome.config';
 import { ExclusionZone, isExcluded } from './placement-exclusion';
 import { SpatialGrid } from './spatial-grid';
-import {
-  BIOME_BOUNDARY_TILT,
-  BIOME_BOUNDARY_Z,
-  BIOME_WARP_AMPLITUDE,
-  MOUNTAIN_BOUNDARY_Z,
-  getBiomeAt
-} from './terrain-generator';
+import { getBiomeAt, getBiomeZRanges } from './terrain-generator';
+import { pickWeightedVariant } from './weighted-random';
 import { WorldBounds } from './world-config';
 
 export interface TreePlacement {
@@ -19,17 +14,6 @@ export interface TreePlacement {
 
 const MIN_TREE_SPACING = 3;
 const MAX_PLACEMENT_ATTEMPTS = 40;
-
-function pickWeightedVariant(weights: Record<TreeVariant, number>): TreeVariant {
-  const entries = Object.entries(weights) as Array<[TreeVariant, number]>;
-  const total = entries.reduce((sum, [, weight]) => sum + weight, 0);
-  let roll = Math.random() * total;
-  for (const [variant, weight] of entries) {
-    roll -= weight;
-    if (roll <= 0) return variant;
-  }
-  return entries[entries.length - 1][0];
-}
 
 function isFarEnough(
   x: number,
@@ -50,25 +34,12 @@ export function generateTreePositions(
   bounds: WorldBounds,
   exclusionZones: readonly ExclusionZone[] = []
 ): TreePlacement[] {
-  // Hranice biomu je nakloněná (tilt) a zvlněná (warp noise), ne konstantní z - tyto
-  // rozsahy proto slouží jen jako padding pro efektivitu vzorkování (kam vůbec
-  // náhodné body v daném biomu cílit), skutečné rozhodnutí dělá getBiomeAt(x, z) níž.
-  const boundaryMaxShift = (Math.abs(BIOME_BOUNDARY_TILT) * (bounds.maxX - bounds.minX)) / 2 + BIOME_WARP_AMPLITUDE;
-  const regions = [
-    { biome: BIOMES['meadow'], minZ: bounds.minZ, maxZ: BIOME_BOUNDARY_Z + boundaryMaxShift },
-    {
-      biome: BIOMES['highlands'],
-      minZ: BIOME_BOUNDARY_Z - boundaryMaxShift,
-      maxZ: MOUNTAIN_BOUNDARY_Z + boundaryMaxShift
-    },
-    { biome: BIOMES['mountains'], minZ: MOUNTAIN_BOUNDARY_Z - boundaryMaxShift, maxZ: bounds.maxZ }
-  ];
-
   const placements: TreePlacement[] = [];
   const placedGrid = new SpatialGrid<TreePlacement>(MIN_TREE_SPACING);
   let nextPlacementId = 0;
 
-  for (const region of regions) {
+  for (const zRange of getBiomeZRanges(bounds)) {
+    const region = { biome: BIOMES[zRange.biome], minZ: zRange.minZ, maxZ: zRange.maxZ };
     for (let i = 0; i < region.biome.treeDensity; i++) {
       for (let attempt = 0; attempt < MAX_PLACEMENT_ATTEMPTS; attempt++) {
         const x = bounds.minX + Math.random() * (bounds.maxX - bounds.minX);

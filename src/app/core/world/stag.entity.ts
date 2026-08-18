@@ -202,30 +202,30 @@ export class StagEntity implements WorldEntity {
     hitbox.position.copy(hitboxCenter);
     this.group.add(hitbox);
 
-    if (isDevMode()) {
-      const hitboxHelper = new THREE.Mesh(
-        new THREE.BoxGeometry(hitboxSize.x, hitboxSize.y, hitboxSize.z),
-        new THREE.MeshBasicMaterial({ color: DEBUG_HITBOX_COLOR, wireframe: true })
-      );
-      hitboxHelper.position.copy(hitboxCenter);
-      this.group.add(hitboxHelper);
-
-      const ringGeometry = new THREE.RingGeometry(
-        STAG_COLLIDER_RADIUS - DEBUG_RING_THICKNESS,
-        STAG_COLLIDER_RADIUS,
-        32
-      );
-      const debugRing = new THREE.Mesh(
-        ringGeometry,
-        new THREE.MeshBasicMaterial({ color: DEBUG_RING_COLOR, side: THREE.DoubleSide })
-      );
-      debugRing.rotation.x = -Math.PI / 2;
-      debugRing.position.y = DEBUG_RING_Y_OFFSET;
-      // Přidán do `group`, ne do `model` - kolider sleduje `group.position` (viz
-      // onColliderMoved v update()), takže musí zůstat nezávislý na modelově vlastním
-      // scale/offsetu.
-      this.group.add(debugRing);
-    }
+    // if (isDevMode()) {
+    //   const hitboxHelper = new THREE.Mesh(
+    //     new THREE.BoxGeometry(hitboxSize.x, hitboxSize.y, hitboxSize.z),
+    //     new THREE.MeshBasicMaterial({ color: DEBUG_HITBOX_COLOR, wireframe: true })
+    //   );
+    //   hitboxHelper.position.copy(hitboxCenter);
+    //   this.group.add(hitboxHelper);
+    //
+    //   const ringGeometry = new THREE.RingGeometry(
+    //     STAG_COLLIDER_RADIUS - DEBUG_RING_THICKNESS,
+    //     STAG_COLLIDER_RADIUS,
+    //     32
+    //   );
+    //   const debugRing = new THREE.Mesh(
+    //     ringGeometry,
+    //     new THREE.MeshBasicMaterial({ color: DEBUG_RING_COLOR, side: THREE.DoubleSide })
+    //   );
+    //   debugRing.rotation.x = -Math.PI / 2;
+    //   debugRing.position.y = DEBUG_RING_Y_OFFSET;
+    //   // Přidán do `group`, ne do `model` - kolider sleduje `group.position` (viz
+    //   // onColliderMoved v update()), takže musí zůstat nezávislý na modelově vlastním
+    //   // scale/offsetu.
+    //   this.group.add(debugRing);
+    // }
 
     this.grazeBehavior = new GrazeBehavior(this.group, {
       anchor: position.clone(),

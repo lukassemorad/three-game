@@ -7,6 +7,7 @@ import { PhysicsService } from '../engine/physics.service';
 import { IntactTreeSaveState, TreeSaveState } from '../../shared/models/save-game.model';
 import { InventoryService } from '../state/inventory.service';
 import { PlayerStateService } from '../state/player-state.service';
+import { ChunkVisibilitySweep } from './chunk-visibility-sweep';
 import { getChunkCenter, getChunkKey, TREE_CHUNK_SIZE } from './chunk-grid';
 import { InstancedTreeBatch } from './instanced-tree-batch';
 import { getIntactTreeVisual, getTreeColliderInfo, TreeEntity, TreeVariant } from './tree.entity';
@@ -37,14 +38,6 @@ const CHUNK_VISIBILITY_INTERVAL = 0.2;
 // přesně na hranici dvou vzdáleností.
 const CHUNK_HIDE_DISTANCE = 160;
 const CHUNK_SHOW_DISTANCE = 130;
-const CHUNK_HIDE_DISTANCE_SQ = CHUNK_HIDE_DISTANCE * CHUNK_HIDE_DISTANCE;
-const CHUNK_SHOW_DISTANCE_SQ = CHUNK_SHOW_DISTANCE * CHUNK_SHOW_DISTANCE;
-
-interface ChunkVisibilityEntry {
-  readonly center: { x: number; z: number };
-  readonly meshes: THREE.Object3D[];
-  visible: boolean;
-}
 
 // Uchopený kmen se nedrží rigidně - "prověšuje" se kolem uchopeného bodu (volný konec táhne
 // gravitace dolů, viz sag v tickGrab) a k cílové pozici/rotaci se tlumeně dohání pružinovým
@@ -146,10 +139,13 @@ export class TreeService {
   private heldTree: TreeEntity | null = null;
   private tickableRegistered = false;
 
-  // Registr chunků pro visibility sweep (viz updateChunkVisibility) - sdružuje meshe napříč
-  // variantami ve stejném chunku, aby se `.visible` přepínalo po chunku, ne po variantě.
-  private readonly chunkVisibility = new Map<string, ChunkVisibilityEntry>();
-  private chunkVisibilityAccumulator = 0;
+  // Visibility sweep (viz ChunkVisibilitySweep) - sdružuje meshe napříč variantami ve stejném
+  // chunku, aby se `.visible` přepínalo po chunku, ne po variantě.
+  private readonly chunkVisibility = new ChunkVisibilitySweep(
+    CHUNK_VISIBILITY_INTERVAL,
+    CHUNK_HIDE_DISTANCE,
+    CHUNK_SHOW_DISTANCE
+  );
 
   // Stav aktuální grab session (platný jen dokud je heldTree nastavený). grabOffsetLocal je
   // bod zásahu paprsku v lokální soustavě kmene v čase uchopení - díky němu zůstává skutečně
@@ -180,7 +176,7 @@ export class TreeService {
         this.physics.step(delta);
         this.tickFalling(delta);
         this.syncFallenTreesToCollision();
-        this.updateChunkVisibility(delta);
+        this.chunkVisibility.update(delta, this.scene.getCameraPosition());
       });
     }
 
@@ -201,16 +197,9 @@ export class TreeService {
       const batch = new InstancedTreeBatch(visual, groupEntries.length, new THREE.Vector3(center.x, 0, center.z));
       this.instancedBatches.set(groupKey, batch);
 
-      let chunkEntry = this.chunkVisibility.get(chunkKey);
-      if (!chunkEntry) {
-        chunkEntry = { center, meshes: [], visible: true };
-        this.chunkVisibility.set(chunkKey, chunkEntry);
-      }
+      for (const mesh of batch.getMeshes()) this.scene.addToScene(mesh);
+      this.chunkVisibility.register(chunkKey, center, batch.getMeshes());
 
-      for (const mesh of batch.getMeshes()) {
-        this.scene.addToScene(mesh);
-        chunkEntry.meshes.push(mesh);
-      }
       for (const mesh of batch.getWedgeMeshes()) {
         this.scene.registerInteractable(mesh, {
           id: `intact-batch-${groupKey}`,
@@ -243,32 +232,6 @@ export class TreeService {
       }
 
       batch.computeBounds();
-    }
-  }
-
-  // Throttlovaný sweep (viz CHUNK_VISIBILITY_INTERVAL) - skryje meshe chunků, které jsou
-  // daleko od hráče, i kdyby zrovna byly ve frustum (frustum culling samo o sobě řeší jen
-  // "není v záběru", ne "je sice v záběru, ale zbytečně daleko"). Hystereze (HIDE > SHOW)
-  // zabraňuje blikání na hranici.
-  private updateChunkVisibility(delta: number): void {
-    if (this.chunkVisibility.size === 0) return;
-    this.chunkVisibilityAccumulator += delta;
-    if (this.chunkVisibilityAccumulator < CHUNK_VISIBILITY_INTERVAL) return;
-    this.chunkVisibilityAccumulator = 0;
-
-    const cameraPosition = this.scene.getCameraPosition();
-    for (const chunk of this.chunkVisibility.values()) {
-      const dx = chunk.center.x - cameraPosition.x;
-      const dz = chunk.center.z - cameraPosition.z;
-      const distSq = dx * dx + dz * dz;
-
-      if (chunk.visible && distSq > CHUNK_HIDE_DISTANCE_SQ) {
-        chunk.visible = false;
-        for (const mesh of chunk.meshes) mesh.visible = false;
-      } else if (!chunk.visible && distSq < CHUNK_SHOW_DISTANCE_SQ) {
-        chunk.visible = true;
-        for (const mesh of chunk.meshes) mesh.visible = true;
-      }
     }
   }
 
@@ -439,7 +402,6 @@ export class TreeService {
     this.standingBodies.clear();
     this.instancedBatches.clear();
     this.chunkVisibility.clear();
-    this.chunkVisibilityAccumulator = 0;
     this.intactTrees.clear();
     this.nextIntactTreeId = 0;
     this.heldTree = null;
