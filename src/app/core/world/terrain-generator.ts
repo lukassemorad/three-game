@@ -106,7 +106,14 @@ const MOUNTAIN_RIDGE_AMPLITUDE = 8;
 const MOUNTAIN_JAGGED_FREQ = 0.35;
 const MOUNTAIN_JAGGED_AMPLITUDE = 1.8;
 
-const GROUND_LOW_COLOR = new THREE.Color(0x3a6e3a);
+// Tráva už není jeden plochý odstín - GROUND_LOW_COLOR/_ALT jsou dva odstíny (tmavší
+// a teplejší/olivový), mezi kterými se plocha noise-em (GROUND_PATCH_FREQ) přelévá po
+// větších skvrnách/pásech, než jaké dělá jemný GROUND_MOTTLE_* jitter níž. GROUND_LOW_COLOR
+// byl dřív o dost tmavší než ALT - ta velká světelná propast mezi nimi dělala z velkých
+// skvrn (GROUND_PATCH_FREQ ~20m vlnová délka) nápadné tmavé fleky místo plynulé variace.
+// Rozdíl je teď menší (obě barvy blíž u sebe), ať jde o texturu, ne o kontrastní skvrny.
+const GROUND_LOW_COLOR = new THREE.Color(0x477b46);
+const GROUND_LOW_COLOR_ALT = new THREE.Color(0x5b852e);
 const GROUND_MID_COLOR = new THREE.Color(0x6b5c3a);
 const GROUND_HIGH_COLOR = new THREE.Color(0x7d7d7d);
 const GROUND_SNOW_COLOR = new THREE.Color(0xf5f5f5);
@@ -114,11 +121,14 @@ const GROUND_MID_HEIGHT = 6;
 const GROUND_HIGH_HEIGHT = 12;
 const GROUND_SNOW_HEIGHT = 24;
 
+const GROUND_PATCH_FREQ = 0.05;
+const groundPatchNoise = new ImprovedNoise();
+
 // Samostatný noise (jiné pole než výškový this.noise) a vyšší frekvence než tvar terénu -
 // jinak by skvrny 1:1 kopírovaly reliéf/výškové pásy a působily jako "duch" tvaru terénu
 // místo nezávislé nerovnoměrnosti barvy uvnitř pásu.
 const GROUND_MOTTLE_FREQ = 0.4;
-const GROUND_MOTTLE_LIGHTNESS = 0.06;
+const GROUND_MOTTLE_LIGHTNESS = 0.1;
 const groundMottleNoise = new ImprovedNoise();
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
@@ -263,11 +273,12 @@ export class TerrainGenerator {
   private getGroundColor(height: number, x?: number, z?: number): THREE.Color {
     let color: THREE.Color;
     if (height <= GROUND_MID_HEIGHT) {
-      color = new THREE.Color().lerpColors(
-        GROUND_LOW_COLOR,
-        GROUND_MID_COLOR,
-        smoothstep(0, GROUND_MID_HEIGHT, height)
-      );
+      const patchT =
+        x === undefined || z === undefined
+          ? 0
+          : (groundPatchNoise.noise(x * GROUND_PATCH_FREQ, z * GROUND_PATCH_FREQ, 100) + 1) / 2;
+      const lowColor = new THREE.Color().lerpColors(GROUND_LOW_COLOR, GROUND_LOW_COLOR_ALT, patchT);
+      color = new THREE.Color().lerpColors(lowColor, GROUND_MID_COLOR, smoothstep(0, GROUND_MID_HEIGHT, height));
     } else if (height <= GROUND_HIGH_HEIGHT) {
       color = new THREE.Color().lerpColors(
         GROUND_MID_COLOR,

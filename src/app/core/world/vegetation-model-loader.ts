@@ -20,6 +20,16 @@ export interface VegetationVisual {
 const gltfLoader = new GLTFLoader();
 const visualCache = new Map<VegetationVariant, Promise<VegetationVisual>>();
 
+// Trávové modely (na rozdíl od keřů/květin) mají v .glb souboru zbytečně světlý/syrový
+// odstín zelené, který pod DirectionalLight intensity 2 (three-scene.service.ts) působí
+// vyprano/svítivě - stmavuje se jednou při loadu, sdílenou instancí materiálu pro variantu,
+// takže to platí pro všechny trsy dané varianty bez dopadu na výkon.
+const GRASS_BLADE_VARIANTS: ReadonlySet<VegetationVariant> = new Set<VegetationVariant>([
+  'grassPatch',
+  'tuftOfGrass'
+]);
+const GRASS_BLADE_DARKEN = 0.72;
+
 // Zapeče lokální transform KAŽDÉHO mesh uzlu (pozici/rotaci/škálu vůči kořeni modelu) přímo
 // do klonu jeho geometrie, spolu se sjednocující normalizační škálou (na targetSize, spočtenou
 // z bounding boxu celé scény). Výsledné "parts" tak jde instancovat jednou společnou maticí na
@@ -58,9 +68,13 @@ function extractParts(scene: THREE.Object3D, targetSize: number, variant: Vegeta
     else geometriesByMaterial.set(material, [geometry]);
   });
 
+  const isGrassBlade = GRASS_BLADE_VARIANTS.has(variant);
   const parts: VegetationPart[] = [];
   for (const [material, geometries] of geometriesByMaterial) {
     const geometry = geometries.length === 1 ? geometries[0] : mergeGeometries(geometries);
+    if (isGrassBlade && material instanceof THREE.MeshStandardMaterial) {
+      material.color.multiplyScalar(GRASS_BLADE_DARKEN);
+    }
     let finalMaterial = material;
     if (affectedByWind && material instanceof THREE.MeshStandardMaterial) {
       geometry.computeBoundingBox();

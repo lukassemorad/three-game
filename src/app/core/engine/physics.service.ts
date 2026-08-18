@@ -97,6 +97,31 @@ export class PhysicsService {
     return { rigidBody, collider };
   }
 
+  // Obecná verze createFallenLogBody pro box tvary (kolo a další budoucí "mount"/grab
+  // objekty) - origin těla je bod na zemi (spodek objektu), collider je lokálně posunutý
+  // o originOffsetY (typicky halfExtents.y), stejná konvence jako trunkHeight/2 u kmene.
+  createDynamicBoxBody(
+    position: THREE.Vector3,
+    rotation: THREE.Quaternion,
+    halfExtents: THREE.Vector3,
+    originOffsetY = 0
+  ): FallenLogHandle {
+    const bodyDesc = this.RAPIER.RigidBodyDesc.dynamic()
+      .setTranslation(position.x, position.y, position.z)
+      .setRotation(rotation)
+      .setLinearDamping(0.5)
+      .setAngularDamping(0.5)
+      .setCcdEnabled(true);
+    const rigidBody = this.world.createRigidBody(bodyDesc);
+    const colliderDesc = this.RAPIER.ColliderDesc.cuboid(
+      halfExtents.x,
+      halfExtents.y,
+      halfExtents.z
+    ).setTranslation(0, originOffsetY, 0);
+    const collider = this.world.createCollider(colliderDesc, rigidBody);
+    return { rigidBody, collider };
+  }
+
   setKinematic(handle: FallenLogHandle): void {
     handle.rigidBody.setBodyType(this.RAPIER.RigidBodyType.KinematicPositionBased, true);
   }

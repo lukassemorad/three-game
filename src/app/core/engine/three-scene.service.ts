@@ -27,6 +27,27 @@ export interface InteractableMeta {
   readonly onGrabEnd?: (throwVelocity: THREE.Vector3) => void;
 }
 
+// Cross-cutting "mount" stav hráče (kolo a další budoucí podobné objekty) - analogické
+// heldMeta výše, ale nezávislé na look-at raycastu, protože hráč se při jízdě dívá dopředu,
+// ne na objekt, na kterém jede. Viz beginRide/endRide.
+//
+// Žádný samostatný view-model na kameře - vozidlo se má vizuálně "vézt pod hráčem", ne viset
+// před kamerou jako nesený předmět. Vlastník RideConfig (např. BicycleService) si přes onTick
+// sám přesouvá/natáčí SVOJI existující entitu (stejný objekt, který stál ve světě před
+// nasednutím) na pozici odvozenou z camera.position/rotation - ThreeSceneService do vizuálu
+// vozidla vůbec nezasahuje, jen řídí kdy/jak dlouho jízda trvá.
+export interface RideInputAxes {
+  readonly throttle: number; // -1..1, W/S
+  readonly steer: number; // -1..1, A/D
+}
+
+export interface RideConfig {
+  readonly label?: string;
+  readonly dismountPrompt?: string;
+  readonly onTick?: (camera: THREE.Camera, input: RideInputAxes, delta: number) => void;
+  readonly onDismount: () => void;
+}
+
 export interface LookTarget {
   readonly id: string;
   readonly label?: string;
@@ -97,6 +118,7 @@ export class ThreeSceneService {
   private lastHitPoint: THREE.Vector3 | null = null;
   private lastHitInstanceId: number | null = null;
   private heldMeta: InteractableMeta | null = null;
+  private activeRide: RideConfig | null = null;
   private lastAttackTime = -Infinity;
   private isPrimaryHeld = false;
   private autoFireIntervalSeconds: number | null = null;
@@ -114,6 +136,15 @@ export class ThreeSceneService {
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     this.pressedKeys.add(event.code);
+    if (this.activeRide) {
+      // Za jízdy sesedá E i mezerník odkudkoli - hráč se nedívá na "mount" objekt, dívá se
+      // dopředu, takže to nejde řešit přes lastResolvedMeta/look-at raycast jako běžné onUse.
+      // Skok (Space) i sekundární akce (F) jsou po dobu jízdy taky vyřazené.
+      if ((event.code === 'KeyE' || event.code === 'Space') && !event.repeat) {
+        this.endRide();
+      }
+      return;
+    }
     if (event.code === 'Space' && !event.repeat && this.grounded) {
       const { gradX, gradZ } = this.getSlopeGradient(this.camera.position.x, this.camera.position.z);
       const slope = Math.sqrt(gradX * gradX + gradZ * gradZ);
@@ -130,6 +161,15 @@ export class ThreeSceneService {
   };
   private readonly onKeyUp = (event: KeyboardEvent) => this.pressedKeys.delete(event.code);
 
+  // Syrové vstupní osy pro jízdu (plyn/řízení) - narozdíl od chůze NEJSOU relativní ke
+  // kameře, protože za jízdy má A/D natáčet vozidlo, ne měnit kam se hráč dívá (to dělá
+  // pořád jen myš, viz RideConfig).
+  private getRideInputAxes(): RideInputAxes {
+    const throttle = (this.pressedKeys.has('KeyW') ? 1 : 0) - (this.pressedKeys.has('KeyS') ? 1 : 0);
+    const steer = (this.pressedKeys.has('KeyA') ? 1 : 0) - (this.pressedKeys.has('KeyD') ? 1 : 0);
+    return { throttle, steer };
+  }
+
   private readonly scrollListeners = new Set<(direction: 1 | -1) => void>();
 
   private readonly onWheel = (event: WheelEvent) => {
@@ -139,7 +179,7 @@ export class ThreeSceneService {
   };
 
   private readonly onMouseDown = (event: MouseEvent) => {
-    if (!this.controls.isLocked || event.button !== 0 || this.heldMeta) return;
+    if (!this.controls.isLocked || event.button !== 0 || this.heldMeta || this.activeRide) return;
     this.isPrimaryHeld = true;
     const now = this.clock.getElapsedTime();
     if (now - this.lastAttackTime < ATTACK_COOLDOWN_SECONDS) return;
@@ -200,6 +240,7 @@ export class ThreeSceneService {
     this.lastHitPoint = null;
     this.lastHitInstanceId = null;
     this.heldMeta = null;
+    this.activeRide = null;
     this.isPrimaryHeld = false;
     this.autoFireIntervalSeconds = null;
     this.tickables.clear();
@@ -312,6 +353,31 @@ export class ThreeSceneService {
     this.camera.remove(object);
   }
 
+  // Nasednutí na "mount" objekt (kolo apod.) - vrací false, pokud hráč právě něco nese
+  // (heldMeta) nebo už jede, ať volající (BicycleService) ví, že se nic nezměnilo.
+  beginRide(config: RideConfig): boolean {
+    if (this.heldMeta || this.activeRide) return false;
+    this.activeRide = config;
+    const target: LookTarget = {
+      id: 'ride',
+      label: config.label,
+      interactPrompt: config.dismountPrompt ?? 'E / mezerník - sesednout',
+      distance: 0
+    };
+    this.zone.run(() => this.lookTargetSignal.set(target));
+    return true;
+  }
+
+  // Volá se jen zevnitř onKeyDown (E/Space za jízdy) - žádný externí kód nemá důvod sesedat
+  // hráče programově, viz RideConfig.onDismount pro navazující herní logiku.
+  private endRide(): void {
+    if (!this.activeRide) return;
+    const config = this.activeRide;
+    this.activeRide = null;
+    this.zone.run(() => this.lookTargetSignal.set(null));
+    config.onDismount();
+  }
+
   // Zavoláno při každém platném levém kliknutí (locked, LMB, nic se právě nedrží) bez
   // ohledu na to, zda kliknutí trefilo interactable - pro vizuální feedback (švih ruky),
   // ne herní logiku.
@@ -381,6 +447,12 @@ export class ThreeSceneService {
     return this.camera.position;
   }
 
+  // Vodorovné natočení kamery (yaw, radiány) - používá se k inicializaci směru jízdy při
+  // nasednutí na vozidlo (viz BicycleService.tryMount), nezávisle na pitch/roll.
+  getCameraYaw(): number {
+    return new THREE.Euler(0, 0, 0, 'YXZ').setFromQuaternion(this.camera.quaternion).y;
+  }
+
   getFps(): number {
     return this.lastFps;
   }
@@ -426,6 +498,7 @@ export class ThreeSceneService {
     this.lastHitPoint = null;
     this.lastHitInstanceId = null;
     this.heldMeta = null;
+    this.activeRide = null;
     this.isPrimaryHeld = false;
     this.autoFireIntervalSeconds = null;
     this.tickables.clear();
@@ -508,7 +581,13 @@ export class ThreeSceneService {
     const effectiveDelta = this.controls.isLocked ? delta : 0;
     for (const tick of this.tickables) tick(effectiveDelta);
 
-    if (this.controls.isLocked) {
+    if (this.controls.isLocked && this.activeRide) {
+      // Za jízdy vozidlo řídí svou pozici samo (viz RideConfig) - žádný kamerový
+      // WASD-pohyb ani gravitace/dopad tady neběží, W/S/A/D jsou syrové plyn/řízení, ne
+      // pohyb relativní ke kameře. Otáčení kamery myší (PointerLockControls) tímhle blokem
+      // vůbec neprochází, takže zůstává nezávislé - volný rozhled za jízdy.
+      this.activeRide.onTick?.(this.camera, this.getRideInputAxes(), delta);
+    } else if (this.controls.isLocked) {
       this.moveRightVector.setFromMatrixColumn(this.camera.matrix, 0);
       this.moveForwardVector.crossVectors(this.camera.up, this.moveRightVector);
 
@@ -531,7 +610,12 @@ export class ThreeSceneService {
         dirZ -= this.moveRightVector.z;
       }
 
-      const speedMultiplier = this.getUphillSpeedMultiplier(dirX, dirZ);
+      const speedMultiplier = this.getUphillSpeedMultiplier(
+        this.camera.position.x,
+        this.camera.position.z,
+        dirX,
+        dirZ
+      );
       const distance = MOVE_SPEED * speedMultiplier * delta;
 
       let forwardAmount = 0;
@@ -669,13 +753,24 @@ export class ThreeSceneService {
     }
   }
 
-  private getUphillSpeedMultiplier(dirX: number, dirZ: number): number {
+  // x/z je pozice, ve které se sklon terénu vyhodnocuje (chodec i vozidlo mají vlastní
+  // pozici), dirX/dirZ je směr, jehož sklon nás zajímá (nemusí být normalizovaný). Kladné
+  // číslo = do kopce, záporné = z kopce - použij pro vozidlovou fyziku (viz
+  // VehicleController.update), která z kopce zrychluje, ne jen do kopce zpomaluje.
+  getSlopeAlongDirection(x: number, z: number, dirX: number, dirZ: number): number {
     const dirMagSq = dirX * dirX + dirZ * dirZ;
-    if (dirMagSq === 0) return 1;
+    if (dirMagSq === 0) return 0;
 
     const dirMag = Math.sqrt(dirMagSq);
-    const { gradX, gradZ } = this.getSlopeGradient(this.camera.position.x, this.camera.position.z);
-    const uphillSlope = Math.max(0, (gradX * dirX + gradZ * dirZ) / dirMag);
+    const { gradX, gradZ } = this.getSlopeGradient(x, z);
+    return (gradX * dirX + gradZ * dirZ) / dirMag;
+  }
+
+  // Sklon po směru pohybu se počítá jen "do kopce" (clampnuté na >=0) - z kopce se
+  // nezrychluje, jen do kopce zpomaluje. Používá chůze; vozidla mají vlastní, bohatší model
+  // (viz getSlopeAlongDirection výše).
+  getUphillSpeedMultiplier(x: number, z: number, dirX: number, dirZ: number): number {
+    const uphillSlope = Math.max(0, this.getSlopeAlongDirection(x, z, dirX, dirZ));
     return Math.max(MIN_UPHILL_SPEED_MULTIPLIER, 1 - UPHILL_SLOPE_PENALTY * uphillSlope);
   }
 

@@ -34,6 +34,12 @@ export class PlayerHandService {
     this.entity = null;
   }
 
+  // Schová/zobrazí ruku/nástroj beze změny equipped itemu - volané při nasednutí/sesednutí
+  // z kola (viz BicycleService), ať ruka nekouká zpod view-modelu kola.
+  setVisible(visible: boolean): void {
+    if (this.entity) this.entity.group.visible = visible;
+  }
+
   // Token zneplatní zastaralou odpověď GLTFLoaderu, pokud hráč přepne nástroj (kolečkem)
   // dřív, než se předchozí model stihl načíst - jinak by se mohl připojit "pozdě příchozí"
   // model, který už neodpovídá aktuálně vybavenému nástroji.

@@ -16,6 +16,7 @@ import { PlayerStateService } from '../../core/state/player-state.service';
 import { SaveGameService } from '../../core/state/save-game.service';
 import { ThreeSceneService } from '../../core/engine/three-scene.service';
 import { generateAnimalPlacements } from '../../core/world/animal-placement';
+import { BicycleService } from '../../core/world/bicycle.service';
 import { BuildingService } from '../../core/world/building.service';
 import { FrogService } from '../../core/world/frog.service';
 import { ShopService } from '../../core/world/shop.service';
@@ -59,6 +60,11 @@ const MAIN_ROAD: RoadDefinition = {
 };
 const ROAD_TREE_CLEARANCE = 1.5;
 
+// Testovací umístění kola - na hlavní cestě poblíž spawnu (interpolace mezi kontrolními
+// body MAIN_ROAD {x:-13,z:-68} a {x:0,z:0} pro z=-40, ~7 m od SPAWN_X/SPAWN_Z ve
+// three-scene.service.ts). Bez napojení na save/load, viz plán.
+const BICYCLE_POSITION = { x: -7.6, z: -38 };
+
 @Component({
   selector: 'app-game-canvas',
   imports: [HudComponent, PerfOverlayComponent, HotbarComponent],
@@ -75,6 +81,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     protected readonly threeScene: ThreeSceneService,
     protected readonly gameFlow: GameFlowService,
     private readonly treeService: TreeService,
+    private readonly bicycleService: BicycleService,
     private readonly vegetationService: VegetationService,
     private readonly buildingService: BuildingService,
     private readonly shopService: ShopService,
@@ -150,6 +157,10 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     });
     this.playerHandService.spawn();
 
+    this.bicycleService
+      .spawnBicycle(groundedVec3(BICYCLE_POSITION.x, BICYCLE_POSITION.z))
+      .catch((err) => console.error(err));
+
     const animalPlacements = generateAnimalPlacements(WORLD_BOUNDS, exclusionZones);
 
     this.frogService
@@ -169,6 +180,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.buildingService.dispose();
     this.shopService.dispose();
     this.treeService.dispose();
+    this.bicycleService.dispose();
     this.vegetationService.dispose();
     this.playerHandService.dispose();
     this.frogService.dispose();

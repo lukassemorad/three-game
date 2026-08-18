@@ -30,7 +30,9 @@ export const VEGETATION_DEFS: Record<VegetationVariant, VegetationDef> = {
   grassPatch: {
     modelUrl: polyPizzaGrassUrl('grass-patch-lowpoly.glb'),
     targetSize: 1,
-    variation: { scaleMin: 0.85, scaleRange: 0.3, tintMin: 0.85, tintRange: 0.9 }
+    // tint jde jen 0.55-1.05 (dřív 0.85-1.75) - žádný trs už nesvítí nad "přirozenou" barvu
+    // materiálu a zároveň je citelný rozptyl tmavší/světlejší, ať pole nepůsobí jednobarevně.
+    variation: { scaleMin: 0.85, scaleRange: 0.3, tintMin: 0.55, tintRange: 0.5 }
   },
   // Stejná autorská rodina (Jarlan Perez, CC BY 3.0) jako grassPatch výš - drží se stejný
   // hranatý low-poly styl. targetSize je zatím jen orientační odhad (viz komentář u
@@ -38,7 +40,7 @@ export const VEGETATION_DEFS: Record<VegetationVariant, VegetationDef> = {
   tuftOfGrass: {
     modelUrl: polyPizzaGrassUrl('tuft-of-grass.glb'),
     targetSize: 0.9,
-    variation: { scaleMin: 0.85, scaleRange: 0.3, tintMin: 0.85, tintRange: 0.3 }
+    variation: { scaleMin: 0.85, scaleRange: 0.3, tintMin: 0.55, tintRange: 0.45 }
   },
   dandelions: {
     modelUrl: polyPizzaGrassUrl('dandelions.glb'),

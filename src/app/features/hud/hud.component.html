@@ -17,3 +17,11 @@
     <span class="value">{{ money() }}</span>
   </div>
 </div>
+
+@let speedKmh = rideSpeedKmh();
+@if (speedKmh !== null) {
+  <div class="speedometer">
+    <span class="value">{{ speedKmh.toFixed(1) }}</span>
+    <span class="unit">km/h</span>
+  </div>
+}
