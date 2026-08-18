@@ -545,13 +545,16 @@ export class ThreeSceneService {
         this.camera.position.z +
         this.moveForwardVector.z * forwardAmount +
         this.moveRightVector.z * rightAmount;
-      const resolved = this.collision.resolve(desiredX, desiredZ, PLAYER_RADIUS);
+      const feetY = this.camera.position.y - EYE_HEIGHT;
+      const resolved = this.collision.resolve(desiredX, desiredZ, PLAYER_RADIUS, feetY);
       this.camera.position.x = resolved.x;
       this.camera.position.z = resolved.z;
 
       this.velocityY -= GRAVITY * delta;
       this.camera.position.y += this.velocityY * delta;
-      const groundY = this.getGroundHeight(this.camera.position.x, this.camera.position.z) + EYE_HEIGHT;
+      const terrainY = this.getGroundHeight(this.camera.position.x, this.camera.position.z);
+      const supportY = this.collision.getSupportHeight(this.camera.position.x, this.camera.position.z, feetY);
+      const groundY = Math.max(terrainY, supportY ?? terrainY) + EYE_HEIGHT;
       if (this.camera.position.y <= groundY) {
         this.camera.position.y = groundY;
         this.velocityY = 0;

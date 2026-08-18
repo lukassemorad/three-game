@@ -227,7 +227,8 @@ export class TreeService {
         this.collision.register(id, {
           x: entry.position.x,
           z: entry.position.z,
-          radius: colliderInfo.radius
+          radius: colliderInfo.radius,
+          topY: entry.position.y + colliderInfo.height
         });
         this.standingBodies.set(
           id,
@@ -301,7 +302,8 @@ export class TreeService {
     this.collision.register(tree.id, {
       x: info.position.x,
       z: info.position.z,
-      radius: tree.colliderRadius
+      radius: tree.colliderRadius,
+      topY: info.position.y + tree.trunkHeight
     });
     this.standingBodies.set(
       tree.id,
@@ -393,7 +395,12 @@ export class TreeService {
           this.trees.set(tree.id, tree);
           this.scene.addToScene(tree.group);
           this.registerTree(tree);
-          this.collision.register(tree.id, { x: position.x, z: position.z, radius: tree.colliderRadius });
+          this.collision.register(tree.id, {
+            x: position.x,
+            z: position.z,
+            radius: tree.colliderRadius,
+            topY: position.y + tree.trunkHeight
+          });
           this.standingBodies.set(
             tree.id,
             this.physics.createStaticTreeCollider(
@@ -504,7 +511,10 @@ export class TreeService {
     for (let i = 0; i < segmentCount; i++) {
       const t = i / (segmentCount - 1);
       const point = start.clone().lerp(end, t);
-      this.collision.register(`${tree.id}-log-${i}`, { x: point.x, z: point.y, radius });
+      // Kmen leží na boku na terénu, takže jeho vršek je jednoduše `2*radius` nad zemí
+      // v daném bodě (kruhový průřez, bez ohledu na natočení kolem vlastní osy).
+      const topY = this.scene.getGroundHeight(point.x, point.y) + 2 * radius;
+      this.collision.register(`${tree.id}-log-${i}`, { x: point.x, z: point.y, radius, topY });
     }
   }
 

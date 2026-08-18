@@ -1,5 +1,7 @@
 <div class="crosshair"></div>
 
+<div class="damage-vignette" [style.opacity]="flashOpacity()"></div>
+
 @if (lookTarget(); as target) {
   <div class="interact-prompt">
     <span class="label">{{ target.label }}</span>

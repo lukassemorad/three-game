@@ -20,6 +20,7 @@ import { FrogService } from '../../core/world/frog.service';
 import { ShopService } from '../../core/world/shop.service';
 import { createCircleExclusionZone, createRoadExclusionZone } from '../../core/world/placement-exclusion';
 import { RoadNetwork } from '../../core/world/road-network';
+import { StagService } from '../../core/world/stag.service';
 import { generateTreePositions } from '../../core/world/tree-placement';
 import { PlayerHandService } from '../../core/world/player-hand.service';
 import { TreeService } from '../../core/world/tree.service';
@@ -48,6 +49,15 @@ const FROG_POSITIONS = [
   { x: 18, z: -50 },
   { x: 5, z: -62 },
   { x: 16, z: -78 }
+];
+
+// Západní strana mapy - opačně od budovy/obchodu/žab (ty jsou na x>=5) i od hlavní cesty
+// (láme se přes x=-13 u z=-68) - biom meadow tu vychází spolehlivě i s maximálním možným
+// warpem hranice (viz getBiomeAt v terrain-generator.ts).
+const STAG_POSITIONS = [
+  { x: -22, z: -60 },
+  { x: -28, z: -70 },
+  { x: -20, z: -78 }
 ];
 
 const MAIN_ROAD: RoadDefinition = {
@@ -82,6 +92,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     private readonly buildingService: BuildingService,
     private readonly shopService: ShopService,
     private readonly frogService: FrogService,
+    private readonly stagService: StagService,
     private readonly playerHandService: PlayerHandService,
     private readonly playerState: PlayerStateService,
     private readonly inventory: InventoryService,
@@ -142,6 +153,10 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.frogService
       .spawnFrogs(FROG_POSITIONS.map(({ x, z }) => groundedVec3(x, z)))
       .catch((err) => console.error(err));
+
+    this.stagService
+      .spawnStags(STAG_POSITIONS.map(({ x, z }) => groundedVec3(x, z)))
+      .catch((err) => console.error(err));
   }
 
   ngOnDestroy(): void {
@@ -150,6 +165,7 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.treeService.dispose();
     this.playerHandService.dispose();
     this.frogService.dispose();
+    this.stagService.dispose();
     this.threeScene.dispose();
   }
 

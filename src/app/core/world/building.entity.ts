@@ -17,9 +17,12 @@ export interface WallGroundSegment {
   readonly radius: number;
 }
 
-const HALF_WIDTH = 2.6;
-const HALF_DEPTH = 2.6;
-const WALL_HEIGHT = 3.1;
+export const HALF_WIDTH = 2.6;
+export const HALF_DEPTH = 2.6;
+export const WALL_HEIGHT = 3.1;
+// Vrchní povrch střešní desky nad zemí - použito i mimo tento soubor pro registraci
+// "stojné plochy" střechy do CollisionService (viz building.service.ts).
+export const ROOF_TOP_Y = WALL_HEIGHT + 0.15;
 const WALL_THICKNESS = 0.3;
 // Okno (ne dveře) uprostřed západní zdi - hráč jím kmeny hází dovnitř, neprochází jím.
 const WINDOW_HALF_LENGTH = 1.3;
@@ -164,7 +167,6 @@ export class BuildingEntity {
     for (const geometry of frameGeometries) geometry.dispose();
     this.group.add(new THREE.Mesh(mergedFrame, windowFrameMaterial));
 
-    const roofTopY = WALL_HEIGHT + 0.15;
     const roof = new THREE.Mesh(
       new THREE.BoxGeometry((HALF_WIDTH + ROOF_OVERHANG) * 2, 0.15, (HALF_DEPTH + ROOF_OVERHANG) * 2),
       roofMaterial
@@ -181,11 +183,11 @@ export class BuildingEntity {
     const signPostGeometry = new THREE.BoxGeometry(0.12, signPostHeight, 0.12);
     for (const postZ of [-(signWidth / 2 - 0.2), signWidth / 2 - 0.2]) {
       const post = new THREE.Mesh(signPostGeometry, signPostMaterial);
-      post.position.set(signX, roofTopY + signPostHeight / 2, postZ);
+      post.position.set(signX, ROOF_TOP_Y + signPostHeight / 2, postZ);
       this.group.add(post);
     }
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(signWidth, signHeight), signMaterial);
-    sign.position.set(signX, roofTopY + signPostHeight + signHeight / 2, 0);
+    sign.position.set(signX, ROOF_TOP_Y + signPostHeight + signHeight / 2, 0);
     sign.rotation.y = -Math.PI / 2;
     this.group.add(sign);
 

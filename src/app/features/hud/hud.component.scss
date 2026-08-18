@@ -7,6 +7,12 @@
   color: #fff;
 }
 
+.damage-vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(200, 0, 0, 0) 55%, rgba(200, 0, 0, 0.55) 100%);
+}
+
 .crosshair {
   position: absolute;
   top: 50%;

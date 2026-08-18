@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { ThreeSceneService } from '../engine/three-scene.service';
+import { EntityServiceBase } from './entity-service.base';
 import { FrogEntity, FrogTemplate } from './frog.entity';
 
 const FROG_MODEL_URL = encodeURI('assets/models/Frog by Quaternius - 9Z2V8fpazF.glb');
@@ -26,34 +27,16 @@ function loadFrogTemplate(): Promise<FrogTemplate> {
 }
 
 @Injectable({ providedIn: 'root' })
-export class FrogService {
-  private readonly frogs = new Map<string, FrogEntity>();
-  private tickableRegistered = false;
-
-  constructor(private readonly scene: ThreeSceneService) {}
+export class FrogService extends EntityServiceBase<FrogEntity> {
+  constructor(scene: ThreeSceneService) {
+    super(scene);
+  }
 
   async spawnFrogs(positions: THREE.Vector3[]): Promise<void> {
-    if (!this.tickableRegistered) {
-      this.tickableRegistered = true;
-      this.scene.registerTickable((delta) => {
-        for (const frog of this.frogs.values()) frog.update(delta);
-      });
-    }
-
     const template = await loadFrogTemplate();
     for (const position of positions) {
       const frog = new FrogEntity(position, template, (x, z) => this.scene.getGroundHeight(x, z));
-      this.frogs.set(frog.id, frog);
-      this.scene.addToScene(frog.group);
+      this.register(frog);
     }
-  }
-
-  dispose(): void {
-    for (const frog of this.frogs.values()) {
-      this.scene.removeFromScene(frog.group);
-      frog.dispose();
-    }
-    this.frogs.clear();
-    this.tickableRegistered = false;
   }
 }

@@ -8,9 +8,12 @@ export interface ShopConfig {
   readonly position: THREE.Vector3;
 }
 
-const HALF_WIDTH = 3.6;
-const HALF_DEPTH = 3.6;
-const WALL_HEIGHT = 4.2;
+export const HALF_WIDTH = 3.6;
+export const HALF_DEPTH = 3.6;
+export const WALL_HEIGHT = 4.2;
+// Vrchní povrch střešní desky nad zemí - použito i mimo tento soubor pro registraci
+// "stojné plochy" střechy do CollisionService (viz shop.service.ts).
+export const ROOF_TOP_Y = WALL_HEIGHT + 0.15;
 const WALL_THICKNESS = 0.35;
 // Vchod (na rozdíl od okna výkupny sahá až na zem) - hráč jím prochází dovnitř.
 const DOOR_HALF_WIDTH = 1;
@@ -319,7 +322,6 @@ export class ShopEntity {
     for (const geometry of baseboardGeometries) geometry.dispose();
     this.group.add(new THREE.Mesh(mergedBaseboard, baseboardMaterial));
 
-    const roofTopY = WALL_HEIGHT + 0.15;
     const roof = new THREE.Mesh(
       new THREE.BoxGeometry((HALF_WIDTH + ROOF_OVERHANG) * 2, 0.15, (HALF_DEPTH + ROOF_OVERHANG) * 2),
       shopRoofMaterial
@@ -336,11 +338,11 @@ export class ShopEntity {
     const signPostGeometry = new THREE.BoxGeometry(0.12, signPostHeight, 0.12);
     for (const postZ of [-(signWidth / 2 - 0.2), signWidth / 2 - 0.2]) {
       const post = new THREE.Mesh(signPostGeometry, shopSignPostMaterial);
-      post.position.set(signX, roofTopY + signPostHeight / 2, postZ);
+      post.position.set(signX, ROOF_TOP_Y + signPostHeight / 2, postZ);
       this.group.add(post);
     }
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(signWidth, signHeight), shopSignMaterial);
-    sign.position.set(signX, roofTopY + signPostHeight + signHeight / 2, 0);
+    sign.position.set(signX, ROOF_TOP_Y + signPostHeight + signHeight / 2, 0);
     sign.rotation.y = -Math.PI / 2;
     this.group.add(sign);
 

@@ -6,7 +6,7 @@ import { ThreeSceneService } from '../engine/three-scene.service';
 import { PhysicsService } from '../engine/physics.service';
 import { InventoryService } from '../state/inventory.service';
 import { PlayerStateService } from '../state/player-state.service';
-import { ShopConfig, ShopEntity } from './shop.entity';
+import { ShopConfig, ShopEntity, HALF_WIDTH, HALF_DEPTH, WALL_HEIGHT, ROOF_TOP_Y } from './shop.entity';
 
 @Injectable({ providedIn: 'root' })
 export class ShopService {
@@ -51,6 +51,14 @@ export class ShopService {
       this.registerGroundSegmentColliders(shop, segment, i);
     }
 
+    this.collision.registerSupportSurface(shop.id, {
+      x: shop.group.position.x,
+      z: shop.group.position.z,
+      halfWidth: HALF_WIDTH,
+      halfDepth: HALF_DEPTH,
+      topY: shop.group.position.y + ROOF_TOP_Y
+    });
+
     for (const { itemId, anchor } of shop.purchasableItems) {
       const item = ITEM_DEFS[itemId];
       this.scene.registerInteractable(anchor, {
@@ -92,7 +100,8 @@ export class ShopService {
       this.collision.register(`${shop.id}-wall-${segmentIndex}-${i}`, {
         x: shop.group.position.x + point.x,
         z: shop.group.position.z + point.y,
-        radius: segment.radius
+        radius: segment.radius,
+        topY: shop.group.position.y + WALL_HEIGHT
       });
     }
   }

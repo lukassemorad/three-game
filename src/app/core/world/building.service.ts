@@ -4,7 +4,7 @@ import { CollisionService } from '../engine/collision.service';
 import { ThreeSceneService } from '../engine/three-scene.service';
 import { PhysicsService } from '../engine/physics.service';
 import { TreeService } from './tree.service';
-import { BuildingConfig, BuildingEntity } from './building.entity';
+import { BuildingConfig, BuildingEntity, HALF_WIDTH, HALF_DEPTH, WALL_HEIGHT, ROOF_TOP_Y } from './building.entity';
 
 @Injectable({ providedIn: 'root' })
 export class BuildingService {
@@ -66,6 +66,17 @@ export class BuildingService {
       const segment = building.groundWallSegments[i];
       this.registerGroundSegmentColliders(building, segment, i);
     }
+
+    // Plochá stojná plocha přes celý půdorys střechy - na rozdíl od zdí (tenký prstenec
+    // kruhů podél obvodu, jen pro blokování) potřebuje "dá se na to vylézt" pokrýt celý
+    // půdorys, ne jen obvod.
+    this.collision.registerSupportSurface(building.id, {
+      x: building.group.position.x,
+      z: building.group.position.z,
+      halfWidth: HALF_WIDTH,
+      halfDepth: HALF_DEPTH,
+      topY: building.group.position.y + ROOF_TOP_Y
+    });
   }
 
   dispose(): void {
@@ -88,7 +99,8 @@ export class BuildingService {
       this.collision.register(`${building.id}-wall-${segmentIndex}-${i}`, {
         x: building.group.position.x + point.x,
         z: building.group.position.z + point.y,
-        radius: segment.radius
+        radius: segment.radius,
+        topY: building.group.position.y + WALL_HEIGHT
       });
     }
   }
