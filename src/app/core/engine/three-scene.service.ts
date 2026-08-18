@@ -56,6 +56,9 @@ const ATTACK_COOLDOWN_SECONDS = 0.5;
 // instancované dávky stromů.
 const TREE_CHUNK_RADIUS = Math.SQRT2 * (TREE_CHUNK_SIZE / 2);
 
+const SPAWN_X = 0;
+const SPAWN_Z = -40;
+
 const SLOPE_SAMPLE_STEP = 0.4;
 const UPHILL_SLOPE_PENALTY = 1.4;
 const MIN_UPHILL_SPEED_MULTIPLIER = 0.3;
@@ -223,7 +226,7 @@ export class ThreeSceneService {
       0.1,
       600
     );
-    this.camera.position.set(0, this.getGroundHeight(0, -40) + EYE_HEIGHT, -40);
+    this.camera.position.set(SPAWN_X, this.getGroundHeight(SPAWN_X, SPAWN_Z) + EYE_HEIGHT, SPAWN_Z);
     // Kamera musí být součástí scény, jinak renderer.render(scene, camera) níže neprojde
     // nic zavěšeného přes attachToCamera (view-model ruky) - traverzuje jen `scene`.
     this.scene.add(this.camera);
@@ -280,6 +283,15 @@ export class ThreeSceneService {
   setPlayerTransform(position: Vec3Like, quaternion: QuatLike): void {
     this.camera.position.set(position.x, position.y, position.z);
     this.camera.quaternion.set(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
+  }
+
+  // Pro případ zaseknutí hráče (v terénu, mezi objekty apod.) - vrátí ho na startovní pozici,
+  // včetně vertikální rychlosti a rotace, aby po teleportu nezůstal viset v pádu nebo pootočený.
+  resetPlayerToSpawn(): void {
+    this.camera.position.set(SPAWN_X, this.getGroundHeight(SPAWN_X, SPAWN_Z) + EYE_HEIGHT + 1, SPAWN_Z);
+    this.camera.quaternion.identity();
+    this.velocityY = 0;
+    this.grounded = true;
   }
 
   addToScene(object: THREE.Object3D): void {

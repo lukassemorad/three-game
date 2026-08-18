@@ -11,12 +11,34 @@ const REST_ROTATION = new THREE.Euler(0.15, -0.35, 0.25);
 const REST_QUATERNION = new THREE.Quaternion().setFromEuler(REST_ROTATION);
 
 const SWING_AXIS = new THREE.Vector3(1, 0, 0);
-const SWING_DURATION_SECONDS = 0.25;
-// Švih = houpnutí celé ruky dopředu (blíž ke kameře, tj. menší z) a dolů (menší y),
-// plus rotace kolem lokální osy ruky (přes quaternion, ne Euler) pro dojem seknutí.
-const SWING_DROP_Y = 0.04;
-const SWING_FORWARD_Z = -0.3;
-const SWING_ROTATION_X = 0.5;
+// Sekundární osa pro diagonální/twistové seknutí - kombinuje se s SWING_AXIS násobením
+// dvou quaternionů (ne sečtením úhlů), takže výsledná rotace není jen "překlopení kolem
+// jedné osy", ale mírně kroucené seknutí (jako otočení zápěstí při skutečném seku sekerou).
+const SWING_TWIST_AXIS = new THREE.Vector3(0, 0, 1);
+
+// O něco delší než původních 0.25 s - dává prostor nápřahu a seknutí, aby byly čitelné,
+// při zachování svižnosti (viz swingEase() níže pro rozdělení na fáze).
+const SWING_DURATION_SECONDS = 0.3;
+// Nápřah + samotné seknutí dohromady tvoří menšinu celkové délky, zbytek je hladké
+// dosednutí zpět do klidu - napodobuje animátorské principy anticipation/action/follow-through.
+const SWING_WINDUP_FRACTION = 0.22;
+const SWING_STRIKE_FRACTION = 0.28;
+// Jak hluboko nápřah "couvne" oproti vrcholu seknutí (1 = stejně hluboko jako vrchol seknutí,
+// 0 = žádný nápřah / dřívější chování). 0.35 = znatelné, ale ne přehnané couvnutí.
+const SWING_WINDUP_DEPTH = 0.35;
+
+// Švih = houpnutí ruky dozadu/nahoru (nápřah), pak dopředu/dolů přes vrchol (seknutí) a
+// zpět do klidu. Amplitudy níže se násobí znaménkovou křivkou swingEase() (viz update()) -
+// záporná hodnota v nápřahu proto automaticky vychýlí ruku OPAČNÝM směrem než při seknutí.
+const SWING_DROP_Y = 0.05;
+const SWING_FORWARD_Z = -0.32;
+// Boční posun pro pocit oblouku (arc) - při nápřahu ruka mírně vyjede do strany (dál od
+// středu), při seknutí prosviští opačným směrem (přes tělo), místo přímočarého pohybu.
+const SWING_ARC_X = -0.1;
+const SWING_ROTATION_X = -0.6;
+// Twist/kroucení kolem druhé osy - menší amplituda než hlavní pitch, aby bylo doplňkové
+// (dělá ze seknutí diagonální švih), ne dominantní nad hlavním pohybem dolů.
+const SWING_TWIST_Z = 0.3;
 
 const INSPECT_AXIS = new THREE.Vector3(0, 1, 0);
 const INSPECT_DURATION_SECONDS = 2;
@@ -31,6 +53,28 @@ const handMaterial = new THREE.MeshStandardMaterial({ color: 0xe0ac69 });
 
 type HandAction = 'idle' | 'swing' | 'inspect';
 
+// Znaménková křivka švihu: 0 -> -WINDUP_DEPTH (nápřah) -> 1 (vrchol seknutí) -> 0 (klid).
+// Každá fáze používá smoothstep s nulovou rychlostí na svém konci/začátku, takže hodnota
+// i rychlost sedí přesně na obou vnitřních švech (žádný skok, žádný znatelný zlom) a na
+// t=0/t=1 křivka přesně odpovídá klidové póze (stejná záruka jako u původního sin(t*pi)),
+// takže i rychlé opakované kliknutí (swing() reset elapsed=0 z libovolného bodu) zůstává
+// dobře definované - nová animace vždy startuje čistě od t=0.
+function swingEase(t: number): number {
+  if (t < SWING_WINDUP_FRACTION) {
+    const w = t / SWING_WINDUP_FRACTION;
+    return -SWING_WINDUP_DEPTH * Math.sin(w * Math.PI * 0.5);
+  }
+  const strikeEnd = SWING_WINDUP_FRACTION + SWING_STRIKE_FRACTION;
+  if (t < strikeEnd) {
+    const s = (t - SWING_WINDUP_FRACTION) / SWING_STRIKE_FRACTION;
+    const smooth = s * s * (3 - 2 * s);
+    return -SWING_WINDUP_DEPTH + (1 + SWING_WINDUP_DEPTH) * smooth;
+  }
+  const r = (t - strikeEnd) / (1 - strikeEnd);
+  const smooth = r * r * (3 - 2 * r);
+  return 1 - smooth;
+}
+
 // Ruka poskládaná z primitivní geometrie (předloktí + pěst), sloučená do jednoho meshe
 // stejnou technikou jako zdi v building.entity.ts - žádný GLTF loader/model asset v
 // projektu není zapojen. `toolAnchor` je zatím prázdný uzel na vršku pěsti - místo, kam
@@ -42,6 +86,10 @@ export class PlayerHandEntity {
   private action: HandAction = 'idle';
   private elapsed = 0;
   private readonly animQuaternion = new THREE.Quaternion();
+  // Pomocné quaterniony na kombinaci dvou os švihu - drženy jako pole místo lokálních
+  // proměnných, ať se v update() (voláno každý frame) nic nealokuje.
+  private readonly pitchQuaternion = new THREE.Quaternion();
+  private readonly twistQuaternion = new THREE.Quaternion();
 
   constructor() {
     this.group = new THREE.Group();
@@ -99,13 +147,17 @@ export class PlayerHandEntity {
     const duration = this.action === 'swing' ? SWING_DURATION_SECONDS : INSPECT_DURATION_SECONDS;
     this.elapsed = Math.min(duration, this.elapsed + delta);
     const t = this.elapsed / duration;
-    const ease = Math.sin(t * Math.PI);
 
     if (this.action === 'swing') {
+      const ease = swingEase(t);
+      this.group.position.x = REST_POSITION.x + ease * SWING_ARC_X;
       this.group.position.y = REST_POSITION.y - ease * SWING_DROP_Y;
       this.group.position.z = REST_POSITION.z + ease * SWING_FORWARD_Z;
-      this.animQuaternion.setFromAxisAngle(SWING_AXIS, ease * SWING_ROTATION_X);
+      this.pitchQuaternion.setFromAxisAngle(SWING_AXIS, ease * SWING_ROTATION_X);
+      this.twistQuaternion.setFromAxisAngle(SWING_TWIST_AXIS, ease * SWING_TWIST_Z);
+      this.animQuaternion.copy(this.pitchQuaternion).multiply(this.twistQuaternion);
     } else {
+      const ease = Math.sin(t * Math.PI);
       this.group.position.x = REST_POSITION.x + ease * INSPECT_RIGHT_OFFSET;
       this.group.position.y = REST_POSITION.y + ease * INSPECT_UP_OFFSET;
       this.group.position.z = REST_POSITION.z + ease * INSPECT_FORWARD_OFFSET;

@@ -46,6 +46,19 @@ export class PlayerHandService {
     }
     loadItemModel(item).then((model) => {
       if (token !== this.equipToken) return;
+      // handRotation*/handOffset* přetíží rotaci/pozici jen pro pohled v ruce - model na
+      // podstavci v obchodě (viz shop.entity.ts) používá stejnou cache/loader, ale s base
+      // rotationX/Y/Z z ItemDef a bez posunu.
+      if (item.handRotationX !== undefined || item.handRotationY !== undefined || item.handRotationZ !== undefined) {
+        model.rotation.set(
+          item.handRotationX ?? item.rotationX ?? 0,
+          item.handRotationY ?? item.rotationY ?? 0,
+          item.handRotationZ ?? item.rotationZ ?? 0
+        );
+      }
+      if (item.handOffsetX !== undefined || item.handOffsetY !== undefined || item.handOffsetZ !== undefined) {
+        model.position.set(item.handOffsetX ?? 0, item.handOffsetY ?? 0, item.handOffsetZ ?? 0);
+      }
       this.entity?.attachTool(model);
     });
   }

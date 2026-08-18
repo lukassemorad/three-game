@@ -157,6 +157,10 @@ export class GameCanvasComponent implements AfterViewInit, OnDestroy {
     this.threeScene.lock();
   }
 
+  onRestartPositionClick(): void {
+    this.threeScene.resetPlayerToSpawn();
+  }
+
   onSaveAndExitClick(): void {
     this.saveGame.save();
     this.router.navigate(['/']);
