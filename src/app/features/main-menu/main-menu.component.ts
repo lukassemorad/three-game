@@ -1,4 +1,4 @@
-import { Component, inject, signal } from '@angular/core';
+import { Component, inject, isDevMode, signal } from '@angular/core';
 import { Router } from '@angular/router';
 import { SaveGameService } from '../../core/state/save-game.service';
 import { SettingsService } from '../../core/state/settings.service';
@@ -19,6 +19,8 @@ export class MainMenuComponent {
   protected readonly view = signal<MainMenuView>('main');
   protected readonly hasSavedGame = this.saveGame.hasSavedGame();
   protected readonly saveSummary = this.saveGame.getSaveSummary();
+  // Prototyp planetky je zatím jen dev nástroj, ne součást hry - viz core/planet.
+  protected readonly showPlanetPrototype = isDevMode();
 
   onNewGameClick(): void {
     this.saveGame.clear();
@@ -31,6 +33,10 @@ export class MainMenuComponent {
 
   onSettingsClick(): void {
     this.view.set('settings');
+  }
+
+  onPlanetPrototypeClick(): void {
+    this.router.navigate(['/planet-prototype']);
   }
 
   onBackClick(): void {

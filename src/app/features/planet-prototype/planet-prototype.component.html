@@ -1,0 +1,19 @@
+<div class="scene-container">
+  <canvas #canvas class="planet-canvas"></canvas>
+
+  @if (showDebug) {
+    <pre #debugText class="debug-panel"></pre>
+  }
+
+  <div #hudText class="hud-prompt"></div>
+
+  @if (!planetScene.locked()) {
+    <div class="start-overlay" (click)="onStartClick()">
+      <p>Klikni pro start</p>
+      <p class="hint">WASD pohyb · myš rozhlížení · Space skok · Esc uvolní kurzor</p>
+      <p class="hint">E nasednout na kolo · za jízdy W/S plyn a brzda, A/D řízení, E nebo Space sesednout</p>
+      <p class="hint">R respawn · G přepne Rapier / analytické přisazení k povrchu</p>
+      <button type="button" (click)="onBackClick(); $event.stopPropagation()">Zpět do menu</button>
+    </div>
+  }
+</div>

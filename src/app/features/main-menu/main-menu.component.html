@@ -10,6 +10,9 @@
         }
       </button>
       <button type="button" (click)="onSettingsClick()">Nastavení</button>
+      @if (showPlanetPrototype) {
+        <button type="button" (click)="onPlanetPrototypeClick()">Planetka (prototyp)</button>
+      }
     </div>
   }
 

@@ -14,11 +14,38 @@ export interface VegetationVisual {
   readonly parts: readonly VegetationPart[];
 }
 
+// Vítr se do materiálu zapéká už při loadu, ale jeho shader je závislý na topologii světa
+// (plochý svět míchá výchylku v world XZ, planeta ve view space - viz
+// planet-vegetation-wind.ts). Volitelná injekce sem proto přišla, aby se nemusel duplikovat
+// celý loader; `cacheKey` odděluje cache, jinak by si obě strany přebíraly materiál podle
+// toho, kdo variantu načte první.
+export type WindShaderFactory = (
+  material: THREE.MeshStandardMaterial,
+  minY: number,
+  maxY: number
+) => THREE.MeshStandardMaterial;
+
+export interface VegetationLoadOptions {
+  readonly applyWind?: WindShaderFactory;
+  readonly cacheKey?: string;
+}
+
+// Nízkoúrovňová varianta bez vazby na VegetationVariant/VEGETATION_DEFS - používá ji
+// planetární vrstva pro modely, které nejsou vegetace (stromy). Extrakce částí je totiž
+// to netriviální na celém loaderu (zapékání matic uzlů, rebase pivotu na patu, slučování
+// geometrií po materiálu) a duplikovat ji jinde by si říkalo o rozjezd chování.
+export interface LoadModelOptions {
+  readonly cacheKey: string;
+  // Násobitel barvy materiálu, pokud se má model při loadu stmavit (viz GRASS_BLADE_DARKEN).
+  readonly darken?: number;
+  readonly applyWind?: WindShaderFactory;
+}
+
 // Sdílený loader/cache podle varianty - stejná technika jako item-model-loader.ts/
 // frog.service.ts, model se stáhne/naparsuje jen jednou bez ohledu na to, kolikrát se
 // varianta v placementech vyskytne.
 const gltfLoader = new GLTFLoader();
-const visualCache = new Map<VegetationVariant, Promise<VegetationVisual>>();
+const visualCache = new Map<string, Promise<VegetationVisual>>();
 
 // Trávové modely (na rozdíl od keřů/květin) mají v .glb souboru zbytečně světlý/syrový
 // odstín zelené, který pod DirectionalLight intensity 2 (three-scene.service.ts) působí
@@ -42,7 +69,12 @@ const GRASS_BLADE_DARKEN = 0.72;
 // a slučují (mergeGeometries) po materiálu, ne po uzlu. Bez toho by každý trs znamenal desítky
 // InstancedMesh (jeden draw call na uzel) místo jednoho na materiál - přesně ta zátěž navíc,
 // kterou má instancing řešit.
-function extractParts(scene: THREE.Object3D, targetSize: number, variant: VegetationVariant): VegetationPart[] {
+function extractParts(
+  scene: THREE.Object3D,
+  targetSize: number,
+  darken: number | undefined,
+  applyWind: WindShaderFactory | undefined
+): VegetationPart[] {
   scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(scene);
   const size = box.getSize(new THREE.Vector3());
@@ -54,7 +86,6 @@ function extractParts(scene: THREE.Object3D, targetSize: number, variant: Vegeta
   const normalize = new THREE.Matrix4()
     .makeScale(scale, scale, scale)
     .multiply(new THREE.Matrix4().makeTranslation(0, -box.min.y, 0));
-  const affectedByWind = WIND_AFFECTED_VARIANTS.has(variant);
 
   const geometriesByMaterial = new Map<THREE.Material, THREE.BufferGeometry[]>();
   scene.traverse((child) => {
@@ -68,48 +99,69 @@ function extractParts(scene: THREE.Object3D, targetSize: number, variant: Vegeta
     else geometriesByMaterial.set(material, [geometry]);
   });
 
-  const isGrassBlade = GRASS_BLADE_VARIANTS.has(variant);
   const parts: VegetationPart[] = [];
   for (const [material, geometries] of geometriesByMaterial) {
     const geometry = geometries.length === 1 ? geometries[0] : mergeGeometries(geometries);
-    if (isGrassBlade && material instanceof THREE.MeshStandardMaterial) {
-      material.color.multiplyScalar(GRASS_BLADE_DARKEN);
+    if (darken !== undefined && material instanceof THREE.MeshStandardMaterial) {
+      material.color.multiplyScalar(darken);
     }
     let finalMaterial = material;
-    if (affectedByWind && material instanceof THREE.MeshStandardMaterial) {
+    if (applyWind && material instanceof THREE.MeshStandardMaterial) {
       geometry.computeBoundingBox();
       const minY = geometry.boundingBox!.min.y;
       const maxY = geometry.boundingBox!.max.y;
-      finalMaterial = applyWindShader(material, minY, maxY);
+      finalMaterial = applyWind(material, minY, maxY);
     }
     parts.push({ geometry, material: finalMaterial });
   }
   return parts;
 }
 
-function loadVegetationVisual(variant: VegetationVariant): Promise<VegetationVisual> {
-  let cached = visualCache.get(variant);
+export function loadModelVisual(
+  modelUrl: string,
+  targetSize: number,
+  options: LoadModelOptions
+): Promise<VegetationVisual> {
+  const key = `${options.cacheKey}:${modelUrl}`;
+  let cached = visualCache.get(key);
   if (!cached) {
-    const def = VEGETATION_DEFS[variant];
     cached = new Promise<VegetationVisual>((resolve, reject) => {
       gltfLoader.load(
-        def.modelUrl,
-        (gltf) => resolve({ parts: extractParts(gltf.scene, def.targetSize, variant) }),
+        modelUrl,
+        (gltf) =>
+          resolve({
+            parts: extractParts(gltf.scene, targetSize, options.darken, options.applyWind)
+          }),
         undefined,
         reject
       );
     });
-    visualCache.set(variant, cached);
+    visualCache.set(key, cached);
   }
   return cached;
 }
 
+function loadVegetationVisual(
+  variant: VegetationVariant,
+  options: VegetationLoadOptions
+): Promise<VegetationVisual> {
+  const def = VEGETATION_DEFS[variant];
+  return loadModelVisual(def.modelUrl, def.targetSize, {
+    cacheKey: options.cacheKey ?? 'flat',
+    darken: GRASS_BLADE_VARIANTS.has(variant) ? GRASS_BLADE_DARKEN : undefined,
+    applyWind: WIND_AFFECTED_VARIANTS.has(variant)
+      ? (options.applyWind ?? applyWindShader)
+      : undefined
+  });
+}
+
 export async function loadVegetationVisuals(
-  variants: readonly VegetationVariant[]
+  variants: readonly VegetationVariant[],
+  options: VegetationLoadOptions = {}
 ): Promise<Map<VegetationVariant, VegetationVisual>> {
   const unique = Array.from(new Set(variants));
   const loaded = await Promise.all(
-    unique.map(async (variant) => [variant, await loadVegetationVisual(variant)] as const)
+    unique.map(async (variant) => [variant, await loadVegetationVisual(variant, options)] as const)
   );
   return new Map(loaded);
 }
